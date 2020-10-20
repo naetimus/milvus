@@ -254,6 +254,8 @@ void IndexIVFScalarQuantizer::add_with_ids
     size_t nadd = 0;
     std::unique_ptr<Quantizer> squant(sq.select_quantizer ());
 
+    DirectMapAdd dm_add (direct_map, n, xids);
+
 #pragma omp parallel reduction(+: nadd)
     {
         std::vector<float> residual (d);
@@ -276,18 +278,57 @@ void IndexIVFScalarQuantizer::add_with_ids
                 memset (one_code.data(), 0, code_size);
                 squant->encode_vector (xi, one_code.data());
 
-                invlists->add_entry (list_no, id, one_code.data());
+                size_t ofs = invlists->add_entry (list_no, id, one_code.data());
 
+                dm_add.add (i, list_no, ofs);
                 nadd++;
 
+            } else if (rank == 0 && list_no == -1) {
+                dm_add.add (i, -1, 0);
             }
         }
     }
+
+
     ntotal += n;
 }
 
 
+void IndexIVFScalarQuantizer::add_with_ids_without_codes
+       (idx_t n, const float * x, const idx_t *xids)
+{
+    FAISS_THROW_IF_NOT (is_trained);
+    std::unique_ptr<int64_t []> idx (new int64_t [n]);
+    quantizer->assign (n, x, idx.get());
+    size_t nadd = 0;
+    std::unique_ptr<Quantizer> squant(sq.select_quantizer ());
 
+    DirectMapAdd dm_add (direct_map, n, xids);
+
+#pragma omp parallel reduction(+: nadd)
+    {
+        int nt = omp_get_num_threads();
+        int rank = omp_get_thread_num();
+
+        // each thread takes care of a subset of lists
+        for (size_t i = 0; i < n; i++) {
+            int64_t list_no = idx [i];
+            if (list_no >= 0 && list_no % nt == rank) {
+                int64_t id = xids ? xids[i] : ntotal + i;
+                size_t ofs = invlists->add_entry_without_codes (list_no, id);
+
+                dm_add.add (i, list_no, ofs);
+                nadd++;
+
+            } else if (rank == 0 && list_no == -1) {
+                dm_add.add (i, -1, 0);
+            }
+        }
+    }
+
+
+    ntotal += n;
+}
 
 
 InvertedListScanner* IndexIVFScalarQuantizer::get_InvertedListScanner

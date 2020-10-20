@@ -36,7 +36,7 @@ class IVF : public VecIndex, public FaissBaseIndex {
     }
 
     BinarySet
-    Serialize(const Config& config = Config()) override;
+    Serialize(const Config&) override;
 
     void
     Load(const BinarySet&) override;
@@ -51,23 +51,26 @@ class IVF : public VecIndex, public FaissBaseIndex {
     AddWithoutIds(const DatasetPtr&, const Config&) override;
 
     DatasetPtr
-    Query(const DatasetPtr&, const Config&) override;
+    Query(const DatasetPtr&, const Config&, const faiss::ConcurrentBitsetPtr&) override;
 
+#if 0
     DatasetPtr
     QueryById(const DatasetPtr& dataset, const Config& config) override;
+#endif
 
     int64_t
-    Count() override {
-        return index_->ntotal;
-    }
+    Count() override;
 
     int64_t
-    Dim() override {
-        return index_->d;
-    }
+    Dim() override;
 
+    void
+    UpdateIndexSize() override;
+
+#if 0
     DatasetPtr
     GetVectorById(const DatasetPtr& dataset, const Config& config) override;
+#endif
 
     virtual void
     Seal();
@@ -83,7 +86,7 @@ class IVF : public VecIndex, public FaissBaseIndex {
     GenParams(const Config&);
 
     virtual void
-    QueryImpl(int64_t, const float*, int64_t, float*, int64_t*, const Config&);
+    QueryImpl(int64_t, const float*, int64_t, float*, int64_t*, const Config&, const faiss::ConcurrentBitsetPtr&);
 
     void
     SealImpl() override;

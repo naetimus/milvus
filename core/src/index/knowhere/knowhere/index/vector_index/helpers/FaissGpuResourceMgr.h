@@ -39,7 +39,7 @@ using ResWPtr = std::weak_ptr<Resource>;
 class FaissGpuResourceMgr {
  public:
     friend class ResScope;
-    using ResBQ = milvus::server::BlockingQueue<ResPtr>;
+    using ResBQ = BlockingQueue<ResPtr>;
 
  public:
     struct DeviceParams {
@@ -58,7 +58,7 @@ class FaissGpuResourceMgr {
     Free();
 
     void
-    AllocateTempMem(ResPtr& resource, const int64_t& device_id, const int64_t& size);
+    AllocateTempMem(ResPtr& resource, const int64_t device_id, const int64_t size);
 
     void
     InitDevice(int64_t device_id, int64_t pin_mem_size = 0, int64_t temp_mem_size = 0, int64_t res_num = 2);
@@ -68,16 +68,17 @@ class FaissGpuResourceMgr {
 
     // allocate gpu memory invoke by build or copy_to_gpu
     ResPtr
-    GetRes(const int64_t& device_id, const int64_t& alloc_size = 0);
+    GetRes(const int64_t device_id, const int64_t alloc_size = 0);
 
     void
-    MoveToIdle(const int64_t& device_id, const ResPtr& res);
+    MoveToIdle(const int64_t device_id, const ResPtr& res);
 
     void
     Dump();
 
  protected:
-    bool is_init = false;
+    bool initialized_ = false;
+    std::mutex init_mutex_;
 
     std::map<int64_t, std::unique_ptr<std::mutex>> mutex_cache_;
     std::map<int64_t, DeviceParams> devices_params_;
@@ -86,19 +87,19 @@ class FaissGpuResourceMgr {
 
 class ResScope {
  public:
-    ResScope(ResPtr& res, const int64_t& device_id, const bool& isown)
+    ResScope(ResPtr& res, const int64_t device_id, const bool isown)
         : resource(res), device_id(device_id), move(true), own(isown) {
         Lock();
     }
 
-    ResScope(ResWPtr& res, const int64_t& device_id, const bool& isown)
+    ResScope(ResWPtr& res, const int64_t device_id, const bool isown)
         : resource(res), device_id(device_id), move(true), own(isown) {
         Lock();
     }
 
     // specif for search
     // get the ownership of gpuresource and gpu
-    ResScope(ResWPtr& res, const int64_t& device_id) : device_id(device_id), move(false), own(true) {
+    ResScope(ResWPtr& res, const int64_t device_id) : device_id(device_id), move(false), own(true) {
         resource = res.lock();
         Lock();
     }

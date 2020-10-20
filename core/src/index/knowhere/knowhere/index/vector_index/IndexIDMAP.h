@@ -31,7 +31,7 @@ class IDMAP : public VecIndex, public FaissBaseIndex {
     }
 
     BinarySet
-    Serialize(const Config& config = Config()) override;
+    Serialize(const Config&) override;
 
     void
     Load(const BinarySet&) override;
@@ -46,28 +46,28 @@ class IDMAP : public VecIndex, public FaissBaseIndex {
     AddWithoutIds(const DatasetPtr&, const Config&) override;
 
     DatasetPtr
-    Query(const DatasetPtr&, const Config&) override;
+    Query(const DatasetPtr&, const Config&, const faiss::ConcurrentBitsetPtr&) override;
 
+#if 0
     DatasetPtr
     QueryById(const DatasetPtr& dataset, const Config& config) override;
+#endif
 
     int64_t
-    Count() override {
-        return index_->ntotal;
-    }
+    Count() override;
 
     int64_t
-    Dim() override {
-        return index_->d;
-    }
+    Dim() override;
 
     int64_t
     IndexSize() override {
         return Count() * Dim() * sizeof(FloatType);
     }
 
+#if 0
     DatasetPtr
     GetVectorById(const DatasetPtr& dataset, const Config& config) override;
+#endif
 
     VecIndexPtr
     CopyCpuToGpu(const int64_t, const Config&);
@@ -80,7 +80,7 @@ class IDMAP : public VecIndex, public FaissBaseIndex {
 
  protected:
     virtual void
-    QueryImpl(int64_t, const float*, int64_t, float*, int64_t*, const Config&);
+    QueryImpl(int64_t, const float*, int64_t, float*, int64_t*, const Config&, const faiss::ConcurrentBitsetPtr&);
 
  protected:
     std::mutex mutex_;

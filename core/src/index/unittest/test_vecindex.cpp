@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "knowhere/index/vector_index/IndexType.h"
+#include "knowhere/index/IndexType.h"
 #include "knowhere/index/vector_index/VecIndex.h"
 #include "knowhere/index/vector_index/VecIndexFactory.h"
 #include "knowhere/index/vector_index/helpers/FaissGpuResourceMgr.h"
@@ -82,7 +82,7 @@ TEST_P(VecIndexTest, basic) {
     EXPECT_EQ(index_->index_type(), index_type_);
     EXPECT_EQ(index_->index_mode(), index_mode_);
 
-    auto result = index_->Query(query_dataset, conf);
+    auto result = index_->Query(query_dataset, conf, nullptr);
     AssertAnns(result, nq, conf[milvus::knowhere::meta::TOPK]);
     PrintResult(result, nq, k);
 }
@@ -93,7 +93,7 @@ TEST_P(VecIndexTest, serialize) {
     EXPECT_EQ(index_->Count(), nb);
     EXPECT_EQ(index_->index_type(), index_type_);
     EXPECT_EQ(index_->index_mode(), index_mode_);
-    auto result = index_->Query(query_dataset, conf);
+    auto result = index_->Query(query_dataset, conf, nullptr);
     AssertAnns(result, nq, conf[milvus::knowhere::meta::TOPK]);
 
     auto binaryset = index_->Serialize();
@@ -103,7 +103,7 @@ TEST_P(VecIndexTest, serialize) {
     EXPECT_EQ(index_->Count(), new_index->Count());
     EXPECT_EQ(index_->index_type(), new_index->index_type());
     EXPECT_EQ(index_->index_mode(), new_index->index_mode());
-    auto new_result = new_index_->Query(query_dataset, conf);
+    auto new_result = new_index_->Query(query_dataset, conf, nullptr);
     AssertAnns(new_result, nq, conf[milvus::knowhere::meta::TOPK]);
 }
 

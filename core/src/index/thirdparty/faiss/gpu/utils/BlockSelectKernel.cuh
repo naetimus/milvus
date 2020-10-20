@@ -142,24 +142,21 @@ __global__ void blockSelect(Tensor<K, 2, true> in,
   // Whole warps must participate in the selection
   int limit = utils::roundDown(in.getSize(1), kWarpSize);
 
-  bool bitsetIsEmpty = (bitset.getSize(0) == 0);
+  bool bitsetEmpty = (bitset.getSize(0) == 0);
 
   for (; i < limit; i += ThreadsPerBlock) {
-    if (bitsetIsEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
-      heap.add(*inStart, (IndexType) i);
-    } else {
-      heap.add(-1.0, (IndexType) i);
+    if (bitsetEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
+      heap.addThreadQ(*inStart, (IndexType) i);
     }
-      
+    heap.checkThreadQ();
+
     inStart += ThreadsPerBlock;
   }
 
   // Handle last remainder fraction of a warp of elements
   if (i < in.getSize(1)) {
-    if (bitsetIsEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
+    if (bitsetEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
       heap.addThreadQ(*inStart, (IndexType) i);
-    } else {
-      heap.addThreadQ(-1.0, (IndexType) i);
     }
   }
 
@@ -204,14 +201,13 @@ __global__ void blockSelectPair(Tensor<K, 2, true> inK,
   // Whole warps must participate in the selection
   int limit = utils::roundDown(inK.getSize(1), kWarpSize);
 
-  bool bitsetIsEmpty = (bitset.getSize(0) == 0);
+  bool bitsetEmpty = (bitset.getSize(0) == 0);
 
   for (; i < limit; i += ThreadsPerBlock) {
-    if (bitsetIsEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
-      heap.add(*inKStart, *inVStart);
-    } else {
-      heap.add(-1.0, *inVStart);
+    if (bitsetEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
+      heap.addThreadQ(*inKStart, *inVStart);
     }
+    heap.checkThreadQ();
 
     inKStart += ThreadsPerBlock;
     inVStart += ThreadsPerBlock;
@@ -219,10 +215,8 @@ __global__ void blockSelectPair(Tensor<K, 2, true> inK,
 
   // Handle last remainder fraction of a warp of elements
   if (i < inK.getSize(1)) {
-    if (bitsetIsEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
+    if (bitsetEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
       heap.addThreadQ(*inKStart, *inVStart);
-    } else {
-      heap.addThreadQ(-1.0, *inVStart);
     }
   }
 
@@ -247,6 +241,7 @@ void runBlockSelectPair(Tensor<float, 2, true>& inKeys,
                         Tensor<int, 2, true>& outIndices,
                         bool dir, int k, cudaStream_t stream);
 
+#ifdef FAISS_USE_FLOAT16
 void runBlockSelect(Tensor<half, 2, true>& in,
                     Tensor<uint8_t, 1, true>& bitset,
                     Tensor<half, 2, true>& outKeys,
@@ -259,5 +254,6 @@ void runBlockSelectPair(Tensor<half, 2, true>& inKeys,
                         Tensor<half, 2, true>& outKeys,
                         Tensor<int, 2, true>& outIndices,
                         bool dir, int k, cudaStream_t stream);
+#endif
 
 } } // namespace

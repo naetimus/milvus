@@ -16,8 +16,7 @@ typedef unsigned int linklistsizeint;
 
 template<typename dist_t>
 class HierarchicalNSW : public AlgorithmInterface<dist_t> {
-
-public:
+ public:
     HierarchicalNSW(SpaceInterface<dist_t> *s) {
     }
 
@@ -619,8 +618,6 @@ public:
     }
 
     void loadIndex(milvus::knowhere::MemoryIOReader& input, size_t max_elements_i = 0) {
-        auto totoal_filesize = input.total;
-
         // linxj: init with metrictype
         size_t dim = 100;
         readBinaryPOD(input, metric_type_);
@@ -1133,6 +1130,27 @@ public:
 
         return result;
     }
-};
+
+    int64_t cal_size() {
+        int64_t ret = 0;
+        ret += sizeof(*this);
+        ret += sizeof(*space);
+        ret += visited_list_pool_->GetSize();
+        ret += link_list_locks_.size() * sizeof(std::mutex);
+        ret += element_levels_.size() * sizeof(int);
+        ret += max_elements_ * size_data_per_element_;
+        ret += max_elements_ * sizeof(void*);
+        for (size_t i = 0; i < max_elements_; ++ i) {
+            ret += linkLists_[i] ? size_links_per_element_ * element_levels_[i] : 0;
+        }
+        return ret;
+     }
+
+    };
 
 }
+
+
+
+
+

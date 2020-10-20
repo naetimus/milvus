@@ -15,31 +15,34 @@
 #include <cstring>
 #include <string>
 
+#include "config/ConfigMgr.h"
 #include "easyloggingpp/easylogging++.h"
 #include "server/Server.h"
 #include "src/version.h"
-#include "utils/SignalUtil.h"
+#include "utils/SignalHandler.h"
+#include "utils/Status.h"
 
 INITIALIZE_EASYLOGGINGPP
 
 void
 print_help(const std::string& app_name) {
-    std::cout << std::endl << "Usage: " << app_name << " [OPTIONS]" << std::endl << std::endl;
-    std::cout << "  Options:" << std::endl;
-    std::cout << "   -h --help                 Print this help." << std::endl;
-    std::cout << "   -c --conf_file filename   Read configuration from the file." << std::endl;
-    std::cout << "   -d --daemon               Daemonize this application." << std::endl;
-    std::cout << "   -p --pid_file  filename   PID file used by daemonized app." << std::endl;
-    std::cout << std::endl;
+    std::cout << std::endl << "Usage: " << app_name << " [OPTIONS]" << std::endl;
+    std::cout << R"(
+  Options:
+   -h --help                 Print this help.
+   -c --conf_file filename   Read configuration from the file.
+   -d --daemon               Daemonize this application.
+   -p --pid_file  filename   PID file used by daemonized app.
+)" << std::endl;
 }
 
 void
 print_banner() {
     std::cout << std::endl;
-    std::cout << "    __  _________ _   ____  ______    " << std::endl;
-    std::cout << "   /  |/  /  _/ /| | / / / / / __/    " << std::endl;
-    std::cout << "  / /|_/ // // /_| |/ / /_/ /\\ \\    " << std::endl;
-    std::cout << " /_/  /_/___/____/___/\\____/___/     " << std::endl;
+    std::cout << R"(    __  _________ _   ____  ______  )" << std::endl;
+    std::cout << R"(   /  |/  /  _/ /| | / / / / / __/  )" << std::endl;
+    std::cout << R"(  / /|_/ // // /_| |/ / /_/ /\ \    )" << std::endl;
+    std::cout << R"( /_/  /_/___/____/___/\____/___/    )" << std::endl;
     std::cout << std::endl;
     std::cout << "Welcome to use Milvus!" << std::endl;
     std::cout << "Milvus " << BUILD_TYPE << " version: v" << MILVUS_VERSION << ", built at " << BUILD_TIME << ", with "
@@ -63,7 +66,6 @@ main(int argc, char* argv[]) {
     print_banner();
 
     static struct option long_options[] = {{"conf_file", required_argument, nullptr, 'c'},
-                                           {"log_conf_file", required_argument, nullptr, 'l'},
                                            {"help", no_argument, nullptr, 'h'},
                                            {"daemon", no_argument, nullptr, 'd'},
                                            {"pid_file", required_argument, nullptr, 'p'},
@@ -72,12 +74,12 @@ main(int argc, char* argv[]) {
     int option_index = 0;
     int64_t start_daemonized = 0;
 
-    std::string config_filename, log_config_file;
+    std::string config_filename;
     std::string pid_filename;
     std::string app_name = argv[0];
+    milvus::Status s;
 
     milvus::server::Server& server = milvus::server::Server::GetInstance();
-    milvus::Status s;
 
     if (argc < 2) {
         print_help(app_name);
@@ -85,20 +87,12 @@ main(int argc, char* argv[]) {
     }
 
     int value;
-    while ((value = getopt_long(argc, argv, "c:l:p:dh", long_options, &option_index)) != -1) {
+    while ((value = getopt_long(argc, argv, "c:p:dh", long_options, &option_index)) != -1) {
         switch (value) {
             case 'c': {
                 char* config_filename_ptr = strdup(optarg);
                 config_filename = config_filename_ptr;
                 free(config_filename_ptr);
-                std::cout << "Loading configuration from: " << config_filename << std::endl;
-                break;
-            }
-            case 'l': {
-                char* log_filename_ptr = strdup(optarg);
-                log_config_file = log_filename_ptr;
-                free(log_filename_ptr);
-                std::cout << "Initializing log config from: " << log_config_file << std::endl;
                 break;
             }
             case 'p': {
@@ -124,19 +118,37 @@ main(int argc, char* argv[]) {
     }
 
     /* Handle Signal */
-    signal(SIGHUP, milvus::server::SignalUtil::HandleSignal);
-    signal(SIGINT, milvus::server::SignalUtil::HandleSignal);
-    signal(SIGUSR1, milvus::server::SignalUtil::HandleSignal);
-    signal(SIGSEGV, milvus::server::SignalUtil::HandleSignal);
-    signal(SIGUSR2, milvus::server::SignalUtil::HandleSignal);
-    signal(SIGTERM, milvus::server::SignalUtil::HandleSignal);
+    milvus::signal_routine_func = [](int32_t exit_code) {
+        milvus::server::Server::GetInstance().Stop();
+        exit(exit_code);
+    };
+    signal(SIGHUP, milvus::HandleSignal);
+    signal(SIGINT, milvus::HandleSignal);
+    signal(SIGUSR1, milvus::HandleSignal);
+    signal(SIGSEGV, milvus::HandleSignal);
+    signal(SIGUSR2, milvus::HandleSignal);
+    signal(SIGTERM, milvus::HandleSignal);
 
-    server.Init(start_daemonized, pid_filename, config_filename, log_config_file);
+    try {
+        milvus::ConfigMgr::GetInstance().Init();
+        milvus::ConfigMgr::GetInstance().LoadFile(config_filename);
+        milvus::ConfigMgr::GetInstance().FilePath() = config_filename;
+        std::cout << "Successfully load configuration from " << config_filename << "." << std::endl;
+    } catch (std::exception& ex) {
+        std::cerr << "Load configuration file " << config_filename << " failed: " << ex.what() << std::endl;
+        goto FAIL;
+    } catch (...) {
+        std::cerr << "Load configuration file " << config_filename << " failed: Unknown error." << std::endl;
+        goto FAIL;
+    }
+
+    server.Init(start_daemonized, pid_filename, config_filename);
 
     s = server.Start();
     if (s.ok()) {
         std::cout << "Milvus server started successfully!" << std::endl;
     } else {
+        std::cout << s.message() << std::endl;
         goto FAIL;
     }
 

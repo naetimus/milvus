@@ -12,9 +12,9 @@
 #include "scheduler/SchedInst.h"
 #include "ResourceFactory.h"
 #include "Utils.h"
-#include "config/Config.h"
+#include "config/ServerConfig.h"
 
-#include <fiu-local.h>
+#include <fiu/fiu-local.h>
 #include <set>
 #include <string>
 #include <utility>
@@ -38,6 +38,9 @@ std::mutex OptimizerInst::mutex_;
 BuildMgrPtr BuildMgrInst::instance = nullptr;
 std::mutex BuildMgrInst::mutex_;
 
+CPUBuilderPtr CPUBuilderInst::instance = nullptr;
+std::mutex CPUBuilderInst::mutex_;
+
 void
 load_simple_config() {
     // create and connect
@@ -49,14 +52,10 @@ load_simple_config() {
 
 // get resources
 #ifdef MILVUS_GPU_VERSION
-    bool enable_gpu = false;
-    server::Config& config = server::Config::GetInstance();
-    config.GetGpuResourceConfigEnable(enable_gpu);
+    bool enable_gpu = config.gpu.enable();
     if (enable_gpu) {
-        std::vector<int64_t> gpu_ids;
-        config.GetGpuResourceConfigSearchResources(gpu_ids);
-        std::vector<int64_t> build_gpu_ids;
-        config.GetGpuResourceConfigBuildIndexResources(build_gpu_ids);
+        std::vector<int64_t> gpu_ids = ParseGPUDevices(config.gpu.search_devices());
+        std::vector<int64_t> build_gpu_ids = ParseGPUDevices(config.gpu.build_index_devices());
         auto pcie = Connection("pcie", 12000);
         fiu_do_on("load_simple_config_mock", build_gpu_ids.push_back(1));
 
@@ -94,13 +93,16 @@ StartSchedulerService() {
     ResMgrInst::GetInstance()->Start();
     SchedInst::GetInstance()->Start();
     JobMgrInst::GetInstance()->Start();
+    CPUBuilderInst::GetInstance()->Start();
 }
 
 void
 StopSchedulerService() {
+    CPUBuilderInst::GetInstance()->Stop();
     JobMgrInst::GetInstance()->Stop();
     SchedInst::GetInstance()->Stop();
     ResMgrInst::GetInstance()->Stop();
+    OptimizerInst::GetInstance()->Stop();
 }
 
 }  // namespace scheduler

@@ -23,13 +23,15 @@
 #include <faiss/gpu/GpuCloner.h>
 #endif
 
-#include <fiu-local.h>
+#include <fiu/fiu-local.h>
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "faiss/BuilderSuspend.h"
 #include "knowhere/common/Exception.h"
 #include "knowhere/common/Log.h"
 #include "knowhere/index/vector_index/IndexIVF.h"
@@ -63,15 +65,13 @@ IVF::Load(const BinarySet& binary_set) {
 
 void
 IVF::Train(const DatasetPtr& dataset_ptr, const Config& config) {
-    GETTENSOR(dataset_ptr)
+    GET_TENSOR_DATA_DIM(dataset_ptr)
 
-    faiss::Index* coarse_quantizer = new faiss::IndexFlatL2(dim);
-    int64_t nlist = config[IndexParams::nlist].get<int64_t>();
     faiss::MetricType metric_type = GetMetricType(config[Metric::TYPE].get<std::string>());
-    auto index = std::make_shared<faiss::IndexIVFFlat>(coarse_quantizer, dim, nlist, metric_type);
-    index->train(rows, (float*)p_data);
-
-    index_.reset(faiss::clone_index(index.get()));
+    faiss::Index* coarse_quantizer = new faiss::IndexFlat(dim, metric_type);
+    auto nlist = config[IndexParams::nlist].get<int64_t>();
+    index_ = std::shared_ptr<faiss::Index>(new faiss::IndexIVFFlat(coarse_quantizer, dim, nlist, metric_type));
+    index_->train(rows, reinterpret_cast<const float*>(p_data));
 }
 
 void
@@ -81,8 +81,8 @@ IVF::Add(const DatasetPtr& dataset_ptr, const Config& config) {
     }
 
     std::lock_guard<std::mutex> lk(mutex_);
-    GETTENSORWITHIDS(dataset_ptr)
-    index_->add_with_ids(rows, (float*)p_data, p_ids);
+    GET_TENSOR_DATA_ID(dataset_ptr)
+    index_->add_with_ids(rows, reinterpret_cast<const float*>(p_data), p_ids);
 }
 
 void
@@ -92,30 +92,30 @@ IVF::AddWithoutIds(const DatasetPtr& dataset_ptr, const Config& config) {
     }
 
     std::lock_guard<std::mutex> lk(mutex_);
-    GETTENSOR(dataset_ptr)
-    index_->add(rows, (float*)p_data);
+    GET_TENSOR_DATA(dataset_ptr)
+    index_->add(rows, reinterpret_cast<const float*>(p_data));
 }
 
 DatasetPtr
-IVF::Query(const DatasetPtr& dataset_ptr, const Config& config) {
+IVF::Query(const DatasetPtr& dataset_ptr, const Config& config, const faiss::ConcurrentBitsetPtr& bitset) {
     if (!index_ || !index_->is_trained) {
         KNOWHERE_THROW_MSG("index not initialize or trained");
     }
 
-    GETTENSOR(dataset_ptr)
+    GET_TENSOR_DATA(dataset_ptr)
 
     try {
         fiu_do_on("IVF.Search.throw_std_exception", throw std::exception());
         fiu_do_on("IVF.Search.throw_faiss_exception", throw faiss::FaissException(""));
-        int64_t k = config[meta::TOPK].get<int64_t>();
+        auto k = config[meta::TOPK].get<int64_t>();
         auto elems = rows * k;
 
         size_t p_id_size = sizeof(int64_t) * elems;
         size_t p_dist_size = sizeof(float) * elems;
-        auto p_id = (int64_t*)malloc(p_id_size);
-        auto p_dist = (float*)malloc(p_dist_size);
+        auto p_id = static_cast<int64_t*>(malloc(p_id_size));
+        auto p_dist = static_cast<float*>(malloc(p_dist_size));
 
-        QueryImpl(rows, (float*)p_data, k, p_dist, p_id, config);
+        QueryImpl(rows, reinterpret_cast<const float*>(p_data), k, p_dist, p_id, config, bitset);
 
         //    std::stringstream ss_res_id, ss_res_dist;
         //    for (int i = 0; i < 10; ++i) {
@@ -141,6 +141,7 @@ IVF::Query(const DatasetPtr& dataset_ptr, const Config& config) {
     }
 }
 
+#if 0
 DatasetPtr
 IVF::QueryById(const DatasetPtr& dataset_ptr, const Config& config) {
     if (!index_ || !index_->is_trained) {
@@ -213,6 +214,23 @@ IVF::GetVectorById(const DatasetPtr& dataset_ptr, const Config& config) {
         KNOWHERE_THROW_MSG(e.what());
     }
 }
+#endif
+
+int64_t
+IVF::Count() {
+    if (!index_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
+    return index_->ntotal;
+}
+
+int64_t
+IVF::Dim() {
+    if (!index_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
+    return index_->d;
+}
 
 void
 IVF::Seal() {
@@ -220,6 +238,19 @@ IVF::Seal() {
         KNOWHERE_THROW_MSG("index not initialize or trained");
     }
     SealImpl();
+}
+
+void
+IVF::UpdateIndexSize() {
+    if (!index_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
+    auto ivf_index = dynamic_cast<faiss::IndexIVFFlat*>(index_.get());
+    auto nb = ivf_index->invlists->compute_ntotal();
+    auto nlist = ivf_index->nlist;
+    auto code_size = ivf_index->code_size;
+    // ivf codes, ivf ids and quantizer
+    index_size_ = nb * code_size + nb * sizeof(int64_t) + nlist * code_size;
 }
 
 VecIndexPtr
@@ -256,13 +287,16 @@ IVF::GenGraph(const float* data, const int64_t k, GraphType& graph, const Config
     graph.resize(ntotal);
     GraphType res_vec(total_search_count);
     for (int i = 0; i < total_search_count; ++i) {
+        // it is usually used in NSG::train, to check BuilderSuspend
+        faiss::BuilderSuspend::check_wait();
+
         auto b_size = (i == (total_search_count - 1)) && tail_batch_size != 0 ? tail_batch_size : batch_size;
 
         auto& res = res_vec[i];
         res.resize(K * b_size);
 
-        auto xq = data + batch_size * dim * i;
-        QueryImpl(b_size, (float*)xq, K, res_dis.data(), res.data(), config);
+        const float* xq = data + batch_size * dim * i;
+        QueryImpl(b_size, xq, K, res_dis.data(), res.data(), config, nullptr);
 
         for (int j = 0; j < b_size; ++j) {
             auto& node = graph[batch_size * i + j];
@@ -284,22 +318,23 @@ IVF::GenParams(const Config& config) {
 }
 
 void
-IVF::QueryImpl(int64_t n, const float* data, int64_t k, float* distances, int64_t* labels, const Config& config) {
+IVF::QueryImpl(int64_t n, const float* data, int64_t k, float* distances, int64_t* labels, const Config& config,
+               const faiss::ConcurrentBitsetPtr& bitset) {
     auto params = GenParams(config);
     auto ivf_index = dynamic_cast<faiss::IndexIVF*>(index_.get());
-    ivf_index->nprobe = params->nprobe;
+    ivf_index->nprobe = std::min(params->nprobe, ivf_index->invlists->nlist);
     stdclock::time_point before = stdclock::now();
     if (params->nprobe > 1 && n <= 4) {
         ivf_index->parallel_mode = 1;
     } else {
         ivf_index->parallel_mode = 0;
     }
-    ivf_index->search(n, (float*)data, k, distances, labels, bitset_);
+    ivf_index->search(n, data, k, distances, labels, bitset);
     stdclock::time_point after = stdclock::now();
     double search_cost = (std::chrono::duration<double, std::micro>(after - before)).count();
-    KNOWHERE_LOG_DEBUG << "IVF search cost: " << search_cost
-                       << ", quantization cost: " << faiss::indexIVF_stats.quantization_time
-                       << ", data search cost: " << faiss::indexIVF_stats.search_time;
+    LOG_KNOWHERE_DEBUG_ << "IVF search cost: " << search_cost
+                        << ", quantization cost: " << faiss::indexIVF_stats.quantization_time
+                        << ", data search cost: " << faiss::indexIVF_stats.search_time;
     faiss::indexIVF_stats.quantization_time = 0;
     faiss::indexIVF_stats.search_time = 0;
 }
@@ -310,8 +345,6 @@ IVF::SealImpl() {
     faiss::Index* index = index_.get();
     auto idx = dynamic_cast<faiss::IndexIVF*>(index);
     if (idx != nullptr) {
-        // To be deleted
-        KNOWHERE_LOG_DEBUG << "Test before to_readonly: IVF READONLY " << std::boolalpha << idx->is_readonly();
         idx->to_readonly();
     }
 #endif

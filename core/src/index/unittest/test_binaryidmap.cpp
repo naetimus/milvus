@@ -49,20 +49,28 @@ TEST_P(BinaryIDMAPTest, binaryidmap_basic) {
         {milvus::knowhere::Metric::TYPE, MetricType},
     };
 
+    // null faiss index
+    {
+        ASSERT_ANY_THROW(index_->Serialize(conf));
+        ASSERT_ANY_THROW(index_->Query(query_dataset, conf, nullptr));
+        ASSERT_ANY_THROW(index_->Add(nullptr, conf));
+        ASSERT_ANY_THROW(index_->AddWithoutIds(nullptr, conf));
+    }
+
     index_->Train(base_dataset, conf);
     index_->Add(base_dataset, conf);
     EXPECT_EQ(index_->Count(), nb);
     EXPECT_EQ(index_->Dim(), dim);
     ASSERT_TRUE(index_->GetRawVectors() != nullptr);
     ASSERT_TRUE(index_->GetRawIds() != nullptr);
-    auto result = index_->Query(query_dataset, conf);
+    auto result = index_->Query(query_dataset, conf, nullptr);
     AssertAnns(result, nq, k);
     // PrintResult(result, nq, k);
 
-    auto binaryset = index_->Serialize();
+    auto binaryset = index_->Serialize(conf);
     auto new_index = std::make_shared<milvus::knowhere::BinaryIDMAP>();
     new_index->Load(binaryset);
-    auto result2 = index_->Query(query_dataset, conf);
+    auto result2 = new_index->Query(query_dataset, conf, nullptr);
     AssertAnns(result2, nq, k);
     // PrintResult(re_result, nq, k);
 
@@ -70,13 +78,12 @@ TEST_P(BinaryIDMAPTest, binaryidmap_basic) {
     for (int64_t i = 0; i < nq; ++i) {
         concurrent_bitset_ptr->set(i);
     }
-    index_->SetBlacklist(concurrent_bitset_ptr);
 
-    auto result3 = index_->Query(query_dataset, conf);
-    AssertAnns(result3, nq, k, CheckMode::CHECK_NOT_EQUAL);
+    auto result_bs_1 = index_->Query(query_dataset, conf, concurrent_bitset_ptr);
+    AssertAnns(result_bs_1, nq, k, CheckMode::CHECK_NOT_EQUAL);
 
-    //    auto result4 = index_->SearchById(id_dataset, conf);
-    //    AssertAneq(result4, nq, k);
+    // auto result4 = index_->SearchById(id_dataset, conf);
+    // AssertAneq(result4, nq, k);
 }
 
 TEST_P(BinaryIDMAPTest, binaryidmap_serialize) {
@@ -98,13 +105,13 @@ TEST_P(BinaryIDMAPTest, binaryidmap_serialize) {
     {
         // serialize index
         index_->Train(base_dataset, conf);
-        index_->Add(base_dataset, milvus::knowhere::Config());
-        auto re_result = index_->Query(query_dataset, conf);
+        index_->AddWithoutIds(base_dataset, milvus::knowhere::Config());
+        auto re_result = index_->Query(query_dataset, conf, nullptr);
         AssertAnns(re_result, nq, k);
         //        PrintResult(re_result, nq, k);
         EXPECT_EQ(index_->Count(), nb);
         EXPECT_EQ(index_->Dim(), dim);
-        auto binaryset = index_->Serialize();
+        auto binaryset = index_->Serialize(conf);
         auto bin = binaryset.GetByName("BinaryIVF");
 
         std::string filename = "/tmp/bianryidmap_test_serialize.bin";
@@ -118,8 +125,8 @@ TEST_P(BinaryIDMAPTest, binaryidmap_serialize) {
         index_->Load(binaryset);
         EXPECT_EQ(index_->Count(), nb);
         EXPECT_EQ(index_->Dim(), dim);
-        auto result = index_->Query(query_dataset, conf);
+        auto result = index_->Query(query_dataset, conf, nullptr);
         AssertAnns(result, nq, k);
-        //        PrintResult(result, nq, k);
+        // PrintResult(result, nq, k);
     }
 }

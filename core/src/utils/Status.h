@@ -17,23 +17,32 @@
 
 namespace milvus {
 
+class Status;
+#define STATUS_CHECK(func) \
+    do {                   \
+        Status s = func;   \
+        if (!s.ok()) {     \
+            return s;      \
+        }                  \
+    } while (false)
+
 using StatusCode = ErrorCode;
 
 class Status {
  public:
     Status(StatusCode code, const std::string& msg);
-    Status();
-    ~Status();
+    Status() = default;
+    virtual ~Status();
 
     Status(const Status& s);
+
+    Status(Status&& s) noexcept;
 
     Status&
     operator=(const Status& s);
 
-    Status(Status&& s);
-
     Status&
-    operator=(Status&& s);
+    operator=(Status&& s) noexcept;
 
     static Status
     OK() {
@@ -42,12 +51,12 @@ class Status {
 
     bool
     ok() const {
-        return state_ == nullptr || code() == 0;
+        return state_.empty() || code() == 0;
     }
 
     StatusCode
     code() const {
-        return (state_ == nullptr) ? 0 : *(StatusCode*)(state_);
+        return (state_.empty()) ? 0 : *(StatusCode*)(state_.data());
     }
 
     std::string
@@ -64,7 +73,7 @@ class Status {
     MoveFrom(Status& s);
 
  private:
-    char* state_ = nullptr;
+    std::string state_;
 };  // Status
 
 }  // namespace milvus

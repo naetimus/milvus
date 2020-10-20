@@ -23,6 +23,7 @@
 #endif
 #endif
 
+#include <fstream>
 #include <queue>
 #include <vector>
 
@@ -74,7 +75,9 @@ namespace hnswlib {
 
         virtual void *get_dist_func_param() = 0;
 
-        virtual ~SpaceInterface() {}
+        SpaceInterface() =default;
+
+        virtual ~SpaceInterface() =default;
     };
 
     template<typename dist_t>
@@ -89,11 +92,10 @@ namespace hnswlib {
         virtual ~AlgorithmInterface(){
         }
     };
-
-
 }
 
 #include "space_l2.h"
 #include "space_ip.h"
 #include "bruteforce.h"
 #include "hnswalg.h"
+

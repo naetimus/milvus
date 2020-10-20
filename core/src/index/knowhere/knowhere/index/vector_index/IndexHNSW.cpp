@@ -14,9 +14,11 @@
 #include <algorithm>
 #include <cassert>
 #include <iterator>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "faiss/BuilderSuspend.h"
 #include "hnswlib/hnswalg.h"
 #include "hnswlib/space_ip.h"
 #include "hnswlib/space_l2.h"
@@ -28,13 +30,13 @@
 namespace milvus {
 namespace knowhere {
 
-void
-normalize_vector(float* data, float* norm_array, size_t dim) {
-    float norm = 0.0f;
-    for (int i = 0; i < dim; i++) norm += data[i] * data[i];
-    norm = 1.0f / (sqrtf(norm) + 1e-30f);
-    for (int i = 0; i < dim; i++) norm_array[i] = data[i] * norm;
-}
+// void
+// normalize_vector(float* data, float* norm_array, size_t dim) {
+//     float norm = 0.0f;
+//     for (int i = 0; i < dim; i++) norm += data[i] * data[i];
+//     norm = 1.0f / (sqrtf(norm) + 1e-30f);
+//     for (int i = 0; i < dim; i++) norm_array[i] = data[i] * norm;
+// }
 
 BinarySet
 IndexHNSW::Serialize(const Config& config) {
@@ -48,7 +50,7 @@ IndexHNSW::Serialize(const Config& config) {
         std::shared_ptr<uint8_t[]> data(writer.data_);
 
         BinarySet res_set;
-        res_set.Append("HNSW", data, writer.total);
+        res_set.Append("HNSW", data, writer.rp);
         return res_set;
     } catch (std::exception& e) {
         KNOWHERE_THROW_MSG(e.what());
@@ -64,11 +66,11 @@ IndexHNSW::Load(const BinarySet& index_binary) {
         reader.total = binary->size;
         reader.data_ = binary->data.get();
 
-        hnswlib::SpaceInterface<float>* space;
+        hnswlib::SpaceInterface<float>* space = nullptr;
         index_ = std::make_shared<hnswlib::HierarchicalNSW<float>>(space);
         index_->loadIndex(reader);
 
-        normalize = index_->metric_type_ == 1 ? true : false;  // 1 == InnerProduct
+        normalize = index_->metric_type_ == 1;  // 1 == InnerProduct
     } catch (std::exception& e) {
         KNOWHERE_THROW_MSG(e.what());
     }
@@ -76,17 +78,25 @@ IndexHNSW::Load(const BinarySet& index_binary) {
 
 void
 IndexHNSW::Train(const DatasetPtr& dataset_ptr, const Config& config) {
-    GETTENSOR(dataset_ptr)
+    try {
+        auto dim = dataset_ptr->Get<int64_t>(meta::DIM);
+        auto rows = dataset_ptr->Get<int64_t>(meta::ROWS);
 
-    hnswlib::SpaceInterface<float>* space;
-    if (config[Metric::TYPE] == Metric::L2) {
-        space = new hnswlib::L2Space(dim);
-    } else if (config[Metric::TYPE] == Metric::IP) {
-        space = new hnswlib::InnerProductSpace(dim);
-        normalize = true;
+        hnswlib::SpaceInterface<float>* space;
+        std::string metric_type = config[Metric::TYPE];
+        if (metric_type == Metric::L2) {
+            space = new hnswlib::L2Space(dim);
+        } else if (metric_type == Metric::IP) {
+            space = new hnswlib::InnerProductSpace(dim);
+            normalize = true;
+        } else {
+            KNOWHERE_THROW_MSG("Metric type not supported: " + metric_type);
+        }
+        index_ = std::make_shared<hnswlib::HierarchicalNSW<float>>(space, rows, config[IndexParams::M].get<int64_t>(),
+                                                                   config[IndexParams::efConstruction].get<int64_t>());
+    } catch (std::exception& e) {
+        KNOWHERE_THROW_MSG(e.what());
     }
-    index_ = std::make_shared<hnswlib::HierarchicalNSW<float>>(space, rows, config[IndexParams::M].get<int64_t>(),
-                                                               config[IndexParams::efConstruction].get<int64_t>());
 }
 
 void
@@ -97,7 +107,7 @@ IndexHNSW::Add(const DatasetPtr& dataset_ptr, const Config& config) {
 
     std::lock_guard<std::mutex> lk(mutex_);
 
-    GETTENSORWITHIDS(dataset_ptr)
+    GET_TENSOR_DATA_ID(dataset_ptr)
 
     //     if (normalize) {
     //         std::vector<float> ep_norm_vector(Dim());
@@ -120,33 +130,33 @@ IndexHNSW::Add(const DatasetPtr& dataset_ptr, const Config& config) {
     index_->addPoint(p_data, p_ids[0]);
 #pragma omp parallel for
     for (int i = 1; i < rows; ++i) {
-        index_->addPoint(((float*)p_data + Dim() * i), p_ids[i]);
+        faiss::BuilderSuspend::check_wait();
+        index_->addPoint((reinterpret_cast<const float*>(p_data) + Dim() * i), p_ids[i]);
     }
 }
 
 DatasetPtr
-IndexHNSW::Query(const DatasetPtr& dataset_ptr, const Config& config) {
+IndexHNSW::Query(const DatasetPtr& dataset_ptr, const Config& config, const faiss::ConcurrentBitsetPtr& bitset) {
     if (!index_) {
         KNOWHERE_THROW_MSG("index not initialize or trained");
     }
-    GETTENSOR(dataset_ptr)
+    GET_TENSOR_DATA(dataset_ptr)
 
     size_t k = config[meta::TOPK].get<int64_t>();
     size_t id_size = sizeof(int64_t) * k;
     size_t dist_size = sizeof(float) * k;
-    auto p_id = (int64_t*)malloc(id_size * rows);
-    auto p_dist = (float*)malloc(dist_size * rows);
+    auto p_id = static_cast<int64_t*>(malloc(id_size * rows));
+    auto p_dist = static_cast<float*>(malloc(dist_size * rows));
 
     index_->setEf(config[IndexParams::ef]);
 
     using P = std::pair<float, int64_t>;
     auto compare = [](const P& v1, const P& v2) { return v1.first < v2.first; };
 
-    faiss::ConcurrentBitsetPtr blacklist = GetBlacklist();
 #pragma omp parallel for
     for (unsigned int i = 0; i < rows; ++i) {
         std::vector<P> ret;
-        const float* single_query = (float*)p_data + i * Dim();
+        const float* single_query = reinterpret_cast<const float*>(p_data) + i * Dim();
 
         // if (normalize) {
         //     std::vector<float> norm_vector(Dim());
@@ -155,10 +165,10 @@ IndexHNSW::Query(const DatasetPtr& dataset_ptr, const Config& config) {
         // } else {
         //     ret = index_->searchKnn((float*)single_query, config[meta::TOPK].get<int64_t>(), compare);
         // }
-        ret = index_->searchKnn((float*)single_query, k, compare, blacklist);
+        ret = index_->searchKnn(single_query, k, compare, bitset);
 
         while (ret.size() < k) {
-            ret.push_back(std::make_pair(-1, -1));
+            ret.emplace_back(std::make_pair(-1, -1));
         }
         std::vector<float> dist;
         std::vector<int64_t> ids;
@@ -196,7 +206,15 @@ IndexHNSW::Dim() {
     if (!index_) {
         KNOWHERE_THROW_MSG("index not initialize");
     }
-    return (*(size_t*)index_->dist_func_param_);
+    return (*static_cast<size_t*>(index_->dist_func_param_));
+}
+
+void
+IndexHNSW::UpdateIndexSize() {
+    if (!index_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
+    index_size_ = index_->cal_size();
 }
 
 }  // namespace knowhere

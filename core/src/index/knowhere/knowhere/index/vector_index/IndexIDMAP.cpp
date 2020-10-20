@@ -54,9 +54,12 @@ IDMAP::Load(const BinarySet& binary_set) {
 
 void
 IDMAP::Train(const DatasetPtr& dataset_ptr, const Config& config) {
+    // users will assign the metric type when querying
+    // so we let L2 be the default type
+    constexpr faiss::MetricType metric_type = faiss::METRIC_L2;
+
     const char* desc = "IDMap,Flat";
-    int64_t dim = config[meta::DIM].get<int64_t>();
-    faiss::MetricType metric_type = GetMetricType(config[Metric::TYPE].get<std::string>());
+    auto dim = config[meta::DIM].get<int64_t>();
     auto index = faiss::index_factory(dim, desc, metric_type);
     index_.reset(index);
 }
@@ -68,8 +71,8 @@ IDMAP::Add(const DatasetPtr& dataset_ptr, const Config& config) {
     }
 
     std::lock_guard<std::mutex> lk(mutex_);
-    GETTENSORWITHIDS(dataset_ptr)
-    index_->add_with_ids(rows, (float*)p_data, p_ids);
+    GET_TENSOR_DATA_ID(dataset_ptr)
+    index_->add_with_ids(rows, reinterpret_cast<const float*>(p_data), p_ids);
 }
 
 void
@@ -88,24 +91,24 @@ IDMAP::AddWithoutIds(const DatasetPtr& dataset_ptr, const Config& config) {
         new_ids[i] = i;
     }
 
-    index_->add_with_ids(rows, (float*)p_data, new_ids.data());
+    index_->add_with_ids(rows, reinterpret_cast<const float*>(p_data), new_ids.data());
 }
 
 DatasetPtr
-IDMAP::Query(const DatasetPtr& dataset_ptr, const Config& config) {
+IDMAP::Query(const DatasetPtr& dataset_ptr, const Config& config, const faiss::ConcurrentBitsetPtr& bitset) {
     if (!index_) {
         KNOWHERE_THROW_MSG("index not initialize");
     }
-    GETTENSOR(dataset_ptr)
+    GET_TENSOR_DATA(dataset_ptr)
 
-    int64_t k = config[meta::TOPK].get<int64_t>();
+    auto k = config[meta::TOPK].get<int64_t>();
     auto elems = rows * k;
     size_t p_id_size = sizeof(int64_t) * elems;
     size_t p_dist_size = sizeof(float) * elems;
-    auto p_id = (int64_t*)malloc(p_id_size);
-    auto p_dist = (float*)malloc(p_dist_size);
+    auto p_id = static_cast<int64_t*>(malloc(p_id_size));
+    auto p_dist = static_cast<float*>(malloc(p_dist_size));
 
-    QueryImpl(rows, (float*)p_data, k, p_dist, p_id, Config());
+    QueryImpl(rows, reinterpret_cast<const float*>(p_data), k, p_dist, p_id, config, bitset);
 
     auto ret_ds = std::make_shared<Dataset>();
     ret_ds->Set(meta::IDS, p_id);
@@ -113,6 +116,7 @@ IDMAP::Query(const DatasetPtr& dataset_ptr, const Config& config) {
     return ret_ds;
 }
 
+#if 0
 DatasetPtr
 IDMAP::QueryById(const DatasetPtr& dataset_ptr, const Config& config) {
     if (!index_) {
@@ -138,6 +142,23 @@ IDMAP::QueryById(const DatasetPtr& dataset_ptr, const Config& config) {
     ret_ds->Set(meta::IDS, p_id);
     ret_ds->Set(meta::DISTANCE, p_dist);
     return ret_ds;
+}
+#endif
+
+int64_t
+IDMAP::Count() {
+    if (!index_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
+    return index_->ntotal;
+}
+
+int64_t
+IDMAP::Dim() {
+    if (!index_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
+    return index_->d;
 }
 
 VecIndexPtr
@@ -179,6 +200,7 @@ IDMAP::GetRawIds() {
     }
 }
 
+#if 0
 DatasetPtr
 IDMAP::GetVectorById(const DatasetPtr& dataset_ptr, const Config& config) {
     if (!index_) {
@@ -198,10 +220,15 @@ IDMAP::GetVectorById(const DatasetPtr& dataset_ptr, const Config& config) {
     ret_ds->Set(meta::TENSOR, p_x);
     return ret_ds;
 }
+#endif
 
 void
-IDMAP::QueryImpl(int64_t n, const float* data, int64_t k, float* distances, int64_t* labels, const Config& config) {
-    index_->search(n, (float*)data, k, distances, labels, bitset_);
+IDMAP::QueryImpl(int64_t n, const float* data, int64_t k, float* distances, int64_t* labels, const Config& config,
+                 const faiss::ConcurrentBitsetPtr& bitset) {
+    // assign the metric type
+    auto flat_index = dynamic_cast<faiss::IndexIDMap*>(index_.get())->index;
+    flat_index->metric_type = GetMetricType(config[Metric::TYPE].get<std::string>());
+    index_->search(n, data, k, distances, labels, bitset);
 }
 
 }  // namespace knowhere

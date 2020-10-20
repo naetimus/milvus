@@ -12,10 +12,12 @@
 #pragma once
 
 #include <string>
+#include <vector>
+
+#include "config/ServerConfig.h"
 #include "utils/Status.h"
 
-namespace milvus {
-namespace server {
+namespace milvus::server {
 
 class Server {
  public:
@@ -23,8 +25,7 @@ class Server {
     GetInstance();
 
     void
-    Init(int64_t daemonized, const std::string& pid_filename, const std::string& config_filename,
-         const std::string& log_config_file);
+    Init(int64_t daemonized, const std::string& pid_filename, const std::string& config_filename);
 
     Status
     Start();
@@ -39,20 +40,27 @@ class Server {
     Daemonize();
 
     Status
-    LoadConfig();
-
-    Status
     StartService();
     void
     StopService();
+
+ private:
+    static std::string
+    RunningMode(bool cluster_enable, ClusterRole cluster_role);
+
+    static void
+    LogConfigInFile(const std::string& path);
+
+    static void
+    LogCpuInfo();
 
  private:
     int64_t daemonized_ = 0;
     int pid_fd_ = -1;
     std::string pid_filename_;
     std::string config_filename_;
-    std::string log_config_file_;
+    /* Used for lock work directory */
+    std::vector<int64_t> fd_list_;
 };  // Server
 
-}  // namespace server
-}  // namespace milvus
+}  // namespace milvus::server

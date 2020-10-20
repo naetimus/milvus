@@ -30,7 +30,7 @@ class IndexAnnoy : public VecIndex {
     }
 
     BinarySet
-    Serialize(const Config& config = Config()) override;
+    Serialize(const Config& config) override;
 
     void
     Load(const BinarySet& index_binary) override;
@@ -54,7 +54,7 @@ class IndexAnnoy : public VecIndex {
     }
 
     DatasetPtr
-    Query(const DatasetPtr& dataset_ptr, const Config& config) override;
+    Query(const DatasetPtr& dataset_ptr, const Config& config, const faiss::ConcurrentBitsetPtr& bitset) override;
 
     int64_t
     Count() override;
@@ -62,8 +62,8 @@ class IndexAnnoy : public VecIndex {
     int64_t
     Dim() override;
 
-    int64_t
-    IndexSize() override;
+    void
+    UpdateIndexSize() override;
 
  private:
     MetricType metric_type_;

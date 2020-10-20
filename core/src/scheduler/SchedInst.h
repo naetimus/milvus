@@ -12,18 +12,18 @@
 #pragma once
 
 #include "BuildMgr.h"
+#include "CPUBuilder.h"
 #include "JobMgr.h"
 #include "ResourceMgr.h"
 #include "Scheduler.h"
 #include "Utils.h"
-#include "optimizer/BuildIndexPass.h"
-#include "optimizer/FaissFlatPass.h"
-#include "optimizer/FaissIVFFlatPass.h"
-#include "optimizer/FaissIVFPQPass.h"
-#include "optimizer/FaissIVFSQ8HPass.h"
-#include "optimizer/FaissIVFSQ8Pass.h"
-#include "optimizer/FallbackPass.h"
-#include "optimizer/Optimizer.h"
+#include "config/ServerConfig.h"
+#include "selector/BuildIndexPass.h"
+#include "selector/FaissFlatPass.h"
+#include "selector/FaissIVFPass.h"
+#include "selector/FaissIVFSQ8HPass.h"
+#include "selector/FallbackPass.h"
+#include "selector/Optimizer.h"
 
 #include <memory>
 #include <mutex>
@@ -96,16 +96,11 @@ class OptimizerInst {
             if (instance == nullptr) {
                 std::vector<PassPtr> pass_list;
 #ifdef MILVUS_GPU_VERSION
-                bool enable_gpu = false;
-                server::Config& config = server::Config::GetInstance();
-                config.GetGpuResourceConfigEnable(enable_gpu);
+                bool enable_gpu = config.gpu.enable();
                 if (enable_gpu) {
-                    std::vector<int64_t> build_gpus;
-                    std::vector<int64_t> search_gpus;
-                    int64_t gpu_search_threshold;
-                    config.GetGpuResourceConfigBuildIndexResources(build_gpus);
-                    config.GetGpuResourceConfigSearchResources(search_gpus);
-                    config.GetEngineConfigGpuSearchThreshold(gpu_search_threshold);
+                    std::vector<int64_t> build_gpus = ParseGPUDevices(config.gpu.build_index_devices());
+                    std::vector<int64_t> search_gpus = ParseGPUDevices(config.gpu.search_devices());
+                    int64_t gpu_search_threshold = config.gpu.gpu_search_threshold();
                     std::string build_msg = "Build index gpu:";
                     for (auto build_id : build_gpus) {
                         build_msg.append(" gpu" + std::to_string(build_id));
@@ -121,10 +116,8 @@ class OptimizerInst {
 
                     pass_list.push_back(std::make_shared<BuildIndexPass>());
                     pass_list.push_back(std::make_shared<FaissFlatPass>());
-                    pass_list.push_back(std::make_shared<FaissIVFFlatPass>());
-                    pass_list.push_back(std::make_shared<FaissIVFSQ8Pass>());
+                    pass_list.push_back(std::make_shared<FaissIVFPass>());
                     pass_list.push_back(std::make_shared<FaissIVFSQ8HPass>());
-                    pass_list.push_back(std::make_shared<FaissIVFPQPass>());
                 }
 #endif
                 pass_list.push_back(std::make_shared<FallbackPass>());
@@ -154,6 +147,24 @@ class BuildMgrInst {
 
  private:
     static BuildMgrPtr instance;
+    static std::mutex mutex_;
+};
+
+class CPUBuilderInst {
+ public:
+    static CPUBuilderPtr
+    GetInstance() {
+        if (instance == nullptr) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (instance == nullptr) {
+                instance = std::make_shared<CPUBuilder>();
+            }
+        }
+        return instance;
+    }
+
+ private:
+    static CPUBuilderPtr instance;
     static std::mutex mutex_;
 };
 

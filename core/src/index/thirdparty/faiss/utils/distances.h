@@ -24,31 +24,6 @@ namespace faiss {
  * Optimized distance/norm/inner prod computations
  *********************************************************/
 
-#ifdef __AVX__
-/// Squared L2 distance between two vectors
-float fvec_L2sqr_avx (
-        const float * x,
-        const float * y,
-        size_t d);
-
-/// inner product
-float  fvec_inner_product_avx (
-        const float * x,
-        const float * y,
-        size_t d);
-
-/// L1 distance
-float fvec_L1_avx (
-        const float * x,
-        const float * y,
-        size_t d);
-
-float fvec_Linf_avx (
-        const float * x,
-        const float * y,
-        size_t d);
-#endif
-
 #ifdef __SSE__
 float fvec_L2sqr_sse (
         const float * x,
@@ -183,6 +158,9 @@ void pairwise_indexed_inner_product (
 // threshold on nx above which we switch to BLAS to compute distances
 extern int distance_compute_blas_threshold;
 
+// threshold on nx above which we switch to compute parallel on ny
+extern int parallel_policy_threshold;
+
 /** Return the k nearest neighors of each of the nx vectors x among the ny
  *  vector y, w.r.t to max inner product
  *
@@ -211,6 +189,7 @@ void knn_jaccard (
         size_t d, size_t nx, size_t ny,
         float_maxheap_array_t * res,
         ConcurrentBitsetPtr bitset = nullptr);
+        
 /** same as knn_L2sqr, but base_shift[bno] is subtracted to all
  * computed distances.
  *
@@ -272,6 +251,21 @@ void range_search_inner_product (
         RangeSearchResult *result);
 
 
+/***************************************************************************
+ * elkan
+ ***************************************************************************/
 
+/** Return the nearest neighors of each of the nx vectors x among the ny
+ *
+ * @param x    query vectors, size nx * d
+ * @param y    database vectors, size ny * d
+ * @param ids  result array ids
+ * @param val  result array value
+ */
+void elkan_L2_sse (
+        const float * x,
+        const float * y,
+        size_t d, size_t nx, size_t ny,
+        int64_t *ids, float *val);
 
 } // namespace faiss

@@ -14,34 +14,22 @@
 #include "server/web_impl/dto/Dto.h"
 #include "server/web_impl/Constants.h"
 
-namespace milvus {
-namespace server {
-namespace web {
+namespace milvus::server::web {
 
 #include OATPP_CODEGEN_BEGIN(DTO)
 
-class VectorIdsDto : public oatpp::data::mapping::type::Object {
-    DTO_INIT(VectorIdsDto, Object)
+class EntityIdsDto : public ODTO {
+    DTO_INIT(EntityIdsDto, DTO)
 
-    DTO_FIELD(List<String>::ObjectWrapper, ids);
-};
+    DTO_FIELD(List<String>, ids);
 
-class ResultDto : public oatpp::data::mapping::type::Object {
-    DTO_INIT(ResultDto, Object)
+    DTO_FIELD(String, message);
 
-    DTO_FIELD(String, id);
-    DTO_FIELD(String, dit, "distance");
-};
-
-class TopkResultsDto : public OObject {
-    DTO_INIT(TopkResultsDto, Object);
-
-    DTO_FIELD(Int64, num);
-    DTO_FIELD(List<List<ResultDto::ObjectWrapper>::ObjectWrapper>::ObjectWrapper, results);
+    DTO_FIELD(Int64, code);
 };
 
 #include OATPP_CODEGEN_END(DTO)
 
-} // namespace web
-} // namespace server
-} // namespace milvus
+using EntityIdsDtoT = oatpp::Object<EntityIdsDto>;
+
+} // namespace milvus::server::web

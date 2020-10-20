@@ -11,149 +11,113 @@
 
 #pragma once
 
-#include <atomic>
-#include <map>
-#include <string>
-#include <utility>
-#include <vector>
+#include "config/ServerConfig.h"
+#include "db/DB.h"
+#include "db/IDGenerator.h"
+#include "db/Types.h"
+#include "db/wal/WalFile.h"
+#include "db/wal/WalOperation.h"
+#include "utils/Status.h"
+#include "utils/ThreadPool.h"
 
-#include "WalBuffer.h"
-#include "WalDefinations.h"
-#include "WalFileHandler.h"
-#include "WalMetaHandler.h"
-#include "utils/Error.h"
+#include <list>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace milvus {
 namespace engine {
-namespace wal {
+
+extern const char* WAL_MAX_OP_FILE_NAME;
+extern const char* WAL_DEL_FILE_NAME;
+
+using CollectionMaxOpIDMap = std::unordered_map<std::string, idx_t>;
 
 class WalManager {
  public:
-    explicit WalManager(const MXLogConfiguration& config);
-    ~WalManager();
+    static WalManager&
+    GetInstance();
 
-    /*
-     * init
-     * @param meta
-     * @retval error_code
-     */
-    ErrorCode
-    Init(const meta::MetaPtr& meta);
+    Status
+    Start(const DBOptions& options);
 
-    /*
-     * Get next recovery
-     * @param record[out]: record
-     * @retval error_code
-     */
-    ErrorCode
-    GetNextRecovery(MXLogRecord& record);
+    Status
+    Stop();
 
-    /*
-     * Get next record
-     * @param record[out]: record
-     * @retval error_code
-     */
-    ErrorCode
-    GetNextRecord(MXLogRecord& record);
+    Status
+    DropCollection(const std::string& collection_name);
 
-    /*
-     * Create collection
-     * @param collection_id: collection id
-     * @retval lsn
-     */
-    uint64_t
-    CreateCollection(const std::string& collection_id);
+    Status
+    RecordOperation(const WalOperationPtr& operation, const DBPtr& db);
 
-    /*
-     * Drop collection
-     * @param collection_id: collection id
-     * @retval none
-     */
-    void
-    DropCollection(const std::string& collection_id);
+    Status
+    OperationDone(const std::string& collection_name, idx_t op_id);
 
-    /*
-     * Collection is flushed
-     * @param collection_id: collection id
-     * @param lsn: flushed lsn
-     */
-    void
-    CollectionFlushed(const std::string& collection_id, uint64_t lsn);
+    // max_op_ids is from meta system, wal also record a max id for each collection
+    // compare the two max id, use the max one as recovery base
+    Status
+    Recovery(const DBPtr& db, const CollectionMaxOpIDMap& max_op_ids);
 
-    /*
-     * Insert
-     * @param collection_id: collection id
-     * @param collection_id: partition tag
-     * @param vector_ids: vector ids
-     * @param vectors: vectors
-     */
-    template <typename T>
-    bool
-    Insert(const std::string& collection_id, const std::string& partition_tag, const IDNumbers& vector_ids,
-           const std::vector<T>& vectors);
-
-    /*
-     * Insert
-     * @param collection_id: collection id
-     * @param vector_ids: vector ids
-     */
-    bool
-    DeleteById(const std::string& collection_id, const IDNumbers& vector_ids);
-
-    /*
-     * Get flush lsn
-     * @param collection_id: collection id (empty means all tables)
-     * @retval if there is something not flushed, return lsn;
-     *         else, return 0
-     */
-    uint64_t
-    Flush(const std::string& collection_id = "");
-
-    void
-    RemoveOldFiles(uint64_t flushed_lsn);
+    idx_t
+    GetMaxOperationID(const std::string& collection_name);
 
  private:
-    WalManager
-    operator=(WalManager&);
+    WalManager();
 
-    MXLogConfiguration mxlog_config_;
+    Status
+    Init();
 
-    MXLogBufferPtr p_buffer_;
-    MXLogMetaHandlerPtr p_meta_handler_;
+    Status
+    RecordInsertOperation(const InsertEntityOperationPtr& operation, const DBPtr& db);
 
-    struct TableLsn {
-        uint64_t flush_lsn;
-        uint64_t wal_lsn;
-    };
-    std::mutex mutex_;
-    std::map<std::string, TableLsn> tables_;
-    std::atomic<uint64_t> last_applied_lsn_;
+    Status
+    RecordDeleteOperation(const DeleteEntityOperationPtr& operation, const DBPtr& db);
 
-    // if multi-thread call Flush(), use list
-    struct FlushInfo {
-        std::string collection_id_;
-        uint64_t lsn_ = 0;
+    std::string
+    ConstructFilePath(const std::string& collection_name, const std::string& file_name);
 
-        bool
-        IsValid() {
-            return (lsn_ != 0);
-        }
-        void
-        Clear() {
-            lsn_ = 0;
-        }
-    };
-    FlushInfo flush_info_;
+    void
+    AddCleanupTask(const std::string& collection_name);
+
+    void
+    TakeCleanupTask(std::string& collection_name);
+
+    void
+    StartCleanupThread();
+
+    void
+    WaitCleanupFinish();
+
+    void
+    CleanupThread();
+
+    Status
+    PerformOperation(const WalOperationPtr& operation, const DBPtr& db);
+
+ private:
+    SafeIDGenerator id_gen_;
+
+    bool enable_ = false;
+    bool sync_mode_ = false;
+    std::string wal_path_;
+    int64_t insert_buffer_size_ = 0;
+
+    using WalFileMap = std::unordered_map<std::string, WalFilePtr>;
+    WalFileMap file_map_;  // mapping collection name to file
+    std::mutex file_map_mutex_;
+
+    using MaxOpIdMap = std::unordered_map<std::string, idx_t>;
+    MaxOpIdMap max_op_id_map_;  // mapping collection name to max operation id
+    std::mutex max_op_mutex_;
+
+    ThreadPool cleanup_thread_pool_;
+    std::mutex cleanup_thread_mutex_;
+    std::list<std::future<void>> cleanup_thread_results_;
+
+    std::list<std::string> cleanup_tasks_;  // cleanup target collections
+    std::mutex cleanup_task_mutex_;
 };
 
-extern template bool
-WalManager::Insert<float>(const std::string& collection_id, const std::string& partition_tag,
-                          const IDNumbers& vector_ids, const std::vector<float>& vectors);
-
-extern template bool
-WalManager::Insert<uint8_t>(const std::string& collection_id, const std::string& partition_tag,
-                            const IDNumbers& vector_ids, const std::vector<uint8_t>& vectors);
-
-}  // namespace wal
 }  // namespace engine
 }  // namespace milvus

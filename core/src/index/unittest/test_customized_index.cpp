@@ -10,12 +10,12 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
 #include <fiu-control.h>
-#include <fiu-local.h>
+#include <fiu/fiu-local.h>
 #include <gtest/gtest.h>
 #include <thread>
 
 #include "knowhere/common/Timer.h"
-#include "knowhere/index/vector_index/IndexType.h"
+#include "knowhere/index/IndexType.h"
 #include "unittest/Helper.h"
 #include "unittest/utils.h"
 
@@ -24,7 +24,7 @@ class SingleIndexTest : public DataGen, public TestGpuIndexBase {
     void
     SetUp() override {
         TestGpuIndexBase::SetUp();
-        nb = 1000000;
+        nb = 100000;
         nq = 1000;
         dim = DIM;
         Generate(dim, nb, nq);
@@ -58,7 +58,7 @@ TEST_F(SingleIndexTest, IVFSQHybrid) {
     EXPECT_EQ(index_->Count(), nb);
     EXPECT_EQ(index_->Dim(), dim);
 
-    auto binaryset = index_->Serialize();
+    auto binaryset = index_->Serialize(conf);
     {
         // copy cpu to gpu
         auto cpu_idx = std::make_shared<milvus::knowhere::IVFSQHybrid>(DEVICEID);
@@ -67,7 +67,7 @@ TEST_F(SingleIndexTest, IVFSQHybrid) {
         {
             for (int i = 0; i < 3; ++i) {
                 auto gpu_idx = cpu_idx->CopyCpuToGpu(DEVICEID, conf);
-                auto result = gpu_idx->Query(query_dataset, conf);
+                auto result = gpu_idx->Query(query_dataset, conf, nullptr);
                 AssertAnns(result, nq, conf[milvus::knowhere::meta::TOPK]);
                 // PrintResult(result, nq, k);
             }
@@ -82,20 +82,20 @@ TEST_F(SingleIndexTest, IVFSQHybrid) {
         ASSERT_ANY_THROW(cpu_idx->CopyCpuToGpuWithQuantizer(-1, conf));
         auto pair = cpu_idx->CopyCpuToGpuWithQuantizer(DEVICEID, conf);
         auto gpu_idx = pair.first;
-        auto quantization = pair.second;
 
-        auto result = gpu_idx->Query(query_dataset, conf);
+        auto result = gpu_idx->Query(query_dataset, conf, nullptr);
         AssertAnns(result, nq, conf[milvus::knowhere::meta::TOPK]);
-        //        PrintResult(result, nq, k);
+        // PrintResult(result, nq, k);
 
         milvus::json quantizer_conf{{milvus::knowhere::meta::DEVICEID, DEVICEID}, {"mode", 2}};
         for (int i = 0; i < 2; ++i) {
             auto hybrid_idx = std::make_shared<milvus::knowhere::IVFSQHybrid>(DEVICEID);
             hybrid_idx->Load(binaryset);
+            auto quantization = hybrid_idx->LoadQuantizer(quantizer_conf);
             auto new_idx = hybrid_idx->LoadData(quantization, quantizer_conf);
-            auto result = new_idx->Query(query_dataset, conf);
+            auto result = new_idx->Query(query_dataset, conf, nullptr);
             AssertAnns(result, nq, conf[milvus::knowhere::meta::TOPK]);
-            //            PrintResult(result, nq, k);
+            // PrintResult(result, nq, k);
         }
     }
 
@@ -112,7 +112,7 @@ TEST_F(SingleIndexTest, IVFSQHybrid) {
             hybrid_idx->Load(binaryset);
 
             hybrid_idx->SetQuantizer(quantization);
-            auto result = hybrid_idx->Query(query_dataset, conf);
+            auto result = hybrid_idx->Query(query_dataset, conf, nullptr);
             AssertAnns(result, nq, conf[milvus::knowhere::meta::TOPK]);
             //            PrintResult(result, nq, k);
             hybrid_idx->UnsetQuantizer();

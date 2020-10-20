@@ -25,7 +25,7 @@ using Graph = std::vector<std::vector<int64_t>>;
 
 class GPUIDMAP : public IDMAP, public GPUIndex {
  public:
-    explicit GPUIDMAP(std::shared_ptr<faiss::Index> index, const int64_t& device_id, ResPtr& res)
+    explicit GPUIDMAP(std::shared_ptr<faiss::Index> index, const int64_t device_id, ResPtr& res)
         : IDMAP(std::move(index)), GPUIndex(device_id, res) {
         index_mode_ = IndexMode::MODE_GPU;
     }
@@ -45,6 +45,8 @@ class GPUIDMAP : public IDMAP, public GPUIndex {
     void
     GenGraph(const float*, const int64_t, GraphType&, const Config&);
 
+    virtual ~GPUIDMAP() = default;
+
  protected:
     BinarySet
     SerializeImpl(const IndexType&) override;
@@ -53,7 +55,8 @@ class GPUIDMAP : public IDMAP, public GPUIndex {
     LoadImpl(const BinarySet&, const IndexType&) override;
 
     void
-    QueryImpl(int64_t, const float*, int64_t, float*, int64_t*, const Config&) override;
+    QueryImpl(int64_t, const float*, int64_t, float*, int64_t*, const Config&,
+              const faiss::ConcurrentBitsetPtr& bitset) override;
 };
 
 using GPUIDMAPPtr = std::shared_ptr<GPUIDMAP>;

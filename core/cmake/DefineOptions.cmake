@@ -68,13 +68,11 @@ define_option(MILVUS_WITH_PROMETHEUS "Build with PROMETHEUS library" ON)
 
 define_option(MILVUS_WITH_SQLITE "Build with SQLite library" ON)
 
-define_option(MILVUS_WITH_SQLITE_ORM "Build with SQLite ORM library" ON)
-
 define_option(MILVUS_WITH_MYSQLPP "Build with MySQL++" ON)
 
 define_option(MILVUS_WITH_YAMLCPP "Build with yaml-cpp library" ON)
 
-if (MILVUS_ENABLE_PROFILING STREQUAL "ON")
+if (ENABLE_CPU_PROFILING STREQUAL "ON")
     define_option(MILVUS_WITH_LIBUNWIND "Build with libunwind" ON)
     define_option(MILVUS_WITH_GPERFTOOLS "Build with gperftools" ON)
 endif ()

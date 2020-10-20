@@ -10,7 +10,8 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
 #include <gtest/gtest.h>
-#include <knowhere/index/vector_index/IndexHNSW.h>
+#include <src/index/knowhere/knowhere/common/Config.h>
+#include <src/index/knowhere/knowhere/index/vector_index/IndexHNSW.h>
 #include <src/index/knowhere/knowhere/index/vector_index/helpers/IndexParameter.h>
 #include <iostream>
 #include <random>
@@ -47,12 +48,37 @@ INSTANTIATE_TEST_CASE_P(HNSWParameters, HNSWTest, Values("HNSW"));
 TEST_P(HNSWTest, HNSW_basic) {
     assert(!xb.empty());
 
+    // null faiss index
+    /*
+    {
+        ASSERT_ANY_THROW(index_->Serialize());
+        ASSERT_ANY_THROW(index_->Query(query_dataset, conf));
+        ASSERT_ANY_THROW(index_->Add(nullptr, conf));
+        ASSERT_ANY_THROW(index_->AddWithoutIds(nullptr, conf));
+        ASSERT_ANY_THROW(index_->Count());
+        ASSERT_ANY_THROW(index_->Dim());
+    }
+    */
+
     index_->Train(base_dataset, conf);
     index_->Add(base_dataset, conf);
     EXPECT_EQ(index_->Count(), nb);
     EXPECT_EQ(index_->Dim(), dim);
 
-    auto result = index_->Query(query_dataset, conf);
+    // Serialize and Load before Query
+    milvus::knowhere::BinarySet bs = index_->Serialize(conf);
+
+    int64_t dim = base_dataset->Get<int64_t>(milvus::knowhere::meta::DIM);
+    int64_t rows = base_dataset->Get<int64_t>(milvus::knowhere::meta::ROWS);
+    auto raw_data = base_dataset->Get<const void*>(milvus::knowhere::meta::TENSOR);
+    milvus::knowhere::BinaryPtr bptr = std::make_shared<milvus::knowhere::Binary>();
+    bptr->data = std::shared_ptr<uint8_t[]>((uint8_t*)raw_data, [&](uint8_t*) {});
+    bptr->size = dim * rows * sizeof(float);
+    bs.Append(RAW_DATA, bptr);
+
+    index_->Load(bs);
+
+    auto result = index_->Query(query_dataset, conf, nullptr);
     AssertAnns(result, nq, k);
 }
 
@@ -68,11 +94,24 @@ TEST_P(HNSWTest, HNSW_delete) {
     for (auto i = 0; i < nq; ++i) {
         bitset->set(i);
     }
-    auto result1 = index_->Query(query_dataset, conf);
+
+    // Serialize and Load before Query
+    milvus::knowhere::BinarySet bs = index_->Serialize(conf);
+
+    int64_t dim = base_dataset->Get<int64_t>(milvus::knowhere::meta::DIM);
+    int64_t rows = base_dataset->Get<int64_t>(milvus::knowhere::meta::ROWS);
+    auto raw_data = base_dataset->Get<const void*>(milvus::knowhere::meta::TENSOR);
+    milvus::knowhere::BinaryPtr bptr = std::make_shared<milvus::knowhere::Binary>();
+    bptr->data = std::shared_ptr<uint8_t[]>((uint8_t*)raw_data, [&](uint8_t*) {});
+    bptr->size = dim * rows * sizeof(float);
+    bs.Append(RAW_DATA, bptr);
+
+    index_->Load(bs);
+
+    auto result1 = index_->Query(query_dataset, conf, nullptr);
     AssertAnns(result1, nq, k);
 
-    index_->SetBlacklist(bitset);
-    auto result2 = index_->Query(query_dataset, conf);
+    auto result2 = index_->Query(query_dataset, conf, bitset);
     AssertAnns(result2, nq, k, CheckMode::CHECK_NOT_EQUAL);
 
     /*
@@ -97,6 +136,7 @@ TEST_P(HNSWTest, HNSW_delete) {
     */
 }
 
+/*
 TEST_P(HNSWTest, HNSW_serialize) {
     auto serialize = [](const std::string& filename, milvus::knowhere::BinaryPtr& bin, uint8_t* ret) {
         {
@@ -128,7 +168,7 @@ TEST_P(HNSWTest, HNSW_serialize) {
         auto result = index_->Query(query_dataset, conf);
         AssertAnns(result, nq, conf[milvus::knowhere::meta::TOPK]);
     }
-}
+}*/
 
 /*
  * faiss style test
@@ -154,8 +194,8 @@ main() {
     }
 //    printf("gen xb and ids done! \n");
 
-    //    srand((unsigned)time(NULL));
-    auto random_seed = (unsigned)time(NULL);
+    //    srand((unsigned)time(nullptr));
+    auto random_seed = (unsigned)time(nullptr);
 //    printf("delete ids: \n");
     for (int i = 0; i < nq; i++) {
         auto tmp = rand_r(&random_seed) % nb;
@@ -171,7 +211,7 @@ main() {
     int k = 4;
     int m = 16;
     int ef = 200;
-    milvus::knowhere::IndexHNSW index;
+    milvus::knowhere::IndexHNSW_NM index;
     milvus::knowhere::DatasetPtr base_dataset = generate_dataset(nb, d, (const void*)xb, ids);
 //    base_dataset->Set(milvus::knowhere::meta::ROWS, nb);
 //    base_dataset->Set(milvus::knowhere::meta::DIM, d);

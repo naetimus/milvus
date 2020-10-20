@@ -3,7 +3,6 @@ package com;
 import io.milvus.client.*;
 import org.apache.commons.cli.*;
 import org.apache.commons.lang3.RandomStringUtils;
-import org.testng.SkipException;
 import org.testng.TestNG;
 import org.testng.annotations.DataProvider;
 import org.testng.xml.XmlClass;
@@ -14,80 +13,103 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class MainClass {
-    private static String host = "127.0.0.1";
-    private static String port = "19532";
-    private int index_file_size = 50;
-    public int dimension = 128;
+    private static String HOST = "127.0.0.1";
+//    private static String HOST = "192.168.1.238";
+    private static int PORT = 19530;
+    private int segmentRowCount = 5000;
+    private static ConnectParam CONNECT_PARAM = new ConnectParam.Builder()
+            .withHost(HOST)
+            .withPort(PORT)
+            .build();
+    private static MilvusClient client;
 
     public static void setHost(String host) {
-        MainClass.host = host;
+        MainClass.HOST = host;
     }
 
-    public static void setPort(String port) {
-        MainClass.port = port;
+    public static void setPort(int port) {
+        MainClass.PORT = port;
+    }
+
+    public static String getHost() {
+        return MainClass.HOST;
+    }
+
+    public static int getPort() {
+        return MainClass.PORT;
     }
 
     @DataProvider(name="DefaultConnectArgs")
     public static Object[][] defaultConnectArgs(){
-        return new Object[][]{{host, port}};
+        return new Object[][]{{HOST, PORT}};
     }
 
     @DataProvider(name="ConnectInstance")
-    public Object[][] connectInstance() throws ConnectFailedException {
-        MilvusClient client = new MilvusGrpcClient();
+    public Object[][] connectInstance() throws Exception {
         ConnectParam connectParam = new ConnectParam.Builder()
-                .withHost(host)
-                .withPort(port)
+                .withHost(HOST)
+                .withPort(PORT)
                 .build();
-        client.connect(connectParam);
-        String tableName = RandomStringUtils.randomAlphabetic(10);
-        return new Object[][]{{client, tableName}};
+        client = new MilvusGrpcClient(connectParam).withLogging();
+        String collectionName = RandomStringUtils.randomAlphabetic(10);
+        return new Object[][]{{client, collectionName}};
     }
 
     @DataProvider(name="DisConnectInstance")
-    public Object[][] disConnectInstance() throws ConnectFailedException {
+    public Object[][] disConnectInstance(){
         // Generate connection instance
-        MilvusClient client = new MilvusGrpcClient();
-        ConnectParam connectParam = new ConnectParam.Builder()
-                .withHost(host)
-                .withPort(port)
-                .build();
-        client.connect(connectParam);
-        try {
-            client.disconnect();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
-        String tableName = RandomStringUtils.randomAlphabetic(10);
-        return new Object[][]{{client, tableName}};
+        client = new MilvusGrpcClient(CONNECT_PARAM).withLogging();
+        client.close();
+        String collectionName = RandomStringUtils.randomAlphabetic(10);
+        return new Object[][]{{client, collectionName}};
     }
 
-    @DataProvider(name="Table")
-    public Object[][] provideTable() throws ConnectFailedException {
-        Object[][] tables = new Object[2][2];
-        MetricType[] metricTypes = { MetricType.L2, MetricType.IP };
-        for (int i = 0; i < metricTypes.length; ++i) {
-            String tableName = metricTypes[i].toString()+"_"+RandomStringUtils.randomAlphabetic(10);
-            // Generate connection instance
-            MilvusClient client = new MilvusGrpcClient();
-            ConnectParam connectParam = new ConnectParam.Builder()
-                    .withHost(host)
-                    .withPort(port)
-                    .build();
-            client.connect(connectParam);
-            TableSchema tableSchema = new TableSchema.Builder(tableName, dimension)
-                    .withIndexFileSize(index_file_size)
-                    .withMetricType(metricTypes[i])
-                    .build();
-            Response res = client.createTable(tableSchema);
-            if (!res.ok()) {
-                System.out.println(res.getMessage());
-                throw new SkipException("Table created failed");
-            }
-            tables[i] = new Object[]{client, tableName};
+    private Object[][] genCollection(boolean isBinary, boolean autoId) throws Exception {
+        Object[][] collection;
+        String collectionName = Utils.genUniqueStr("collection");
+        // Generate connection instance
+        client = new MilvusGrpcClient(CONNECT_PARAM).withLogging();
+        CollectionMapping cm = CollectionMapping
+                .create(collectionName)
+                .addField(Constants.intFieldName, DataType.INT64)
+                .addField(Constants.floatFieldName, DataType.FLOAT)
+                .setParamsInJson(new JsonBuilder()
+                    .param("segment_row_limit", segmentRowCount)
+                    .param("auto_id", autoId)
+                    .build());
+        if (isBinary) {
+            cm.addVectorField("binary_vector", DataType.VECTOR_BINARY, Constants.dimension);
+        } else {
+            cm.addVectorField("float_vector", DataType.VECTOR_FLOAT, Constants.dimension);
         }
-        return tables;
+        client.createCollection(cm);
+        collection = new Object[][]{{client, collectionName}};
+        return collection;
     }
+
+    @DataProvider(name="Collection")
+    public Object[][] provideCollection() throws Exception, InterruptedException {
+        Object[][] collection = genCollection(false,true);
+        return collection;
+    }
+    @DataProvider(name="IdCollection")
+    public Object[][] provideIdCollection() throws Exception, InterruptedException {
+        Object[][] idCollection = genCollection(false,false);
+        return idCollection;
+    }
+
+    @DataProvider(name="BinaryCollection")
+    public Object[][] provideBinaryCollection() throws Exception, InterruptedException {
+        Object[][] binaryCollection = genCollection(true,true);
+        return binaryCollection;
+    }
+
+    @DataProvider(name="BinaryIdCollection")
+    public Object[][] provideBinaryIdCollection() throws Exception, InterruptedException {
+        Object[][] binaryIdCollection = genCollection(true,false);
+        return binaryIdCollection;
+    }
+
 
     public static void main(String[] args) {
         CommandLineParser parser = new DefaultParser();
@@ -102,20 +124,13 @@ public class MainClass {
             }
             String port = cmd.getOptionValue("port");
             if (port != null) {
-                setPort(port);
+                setPort(Integer.parseInt(port));
             }
             System.out.println("Host: "+host+", Port: "+port);
         }
         catch(ParseException exp) {
             System.err.println("Parsing failed.  Reason: " + exp.getMessage() );
         }
-
-//        TestListenerAdapter tla = new TestListenerAdapter();
-//        TestNG testng = new TestNG();
-//        testng.setTestClasses(new Class[] { TestPing.class });
-//        testng.setTestClasses(new Class[] { TestConnect.class });
-//        testng.addListener(tla);
-//        testng.run();
 
         XmlSuite suite = new XmlSuite();
         suite.setName("TmpSuite");
@@ -124,14 +139,21 @@ public class MainClass {
         test.setName("TmpTest");
         List<XmlClass> classes = new ArrayList<XmlClass>();
 
-        classes.add(new XmlClass("com.TestPing"));
-        classes.add(new XmlClass("com.TestAddVectors"));
-        classes.add(new XmlClass("com.TestConnect"));
-        classes.add(new XmlClass("com.TestDeleteVectors"));
-        classes.add(new XmlClass("com.TestIndex"));
-        classes.add(new XmlClass("com.TestSearchVectors"));
-        classes.add(new XmlClass("com.TestTable"));
-        classes.add(new XmlClass("com.TestTableCount"));
+//        classes.add(new XmlClass("com.TestPing"));
+//        classes.add(new XmlClass("com.TestInsertEntities"));
+//        classes.add(new XmlClass("com.TestConnect"));
+//        classes.add(new XmlClass("com.TestDeleteEntities"));
+//        classes.add(new XmlClass("com.TestIndex"));
+//        classes.add(new XmlClass("com.TestCompact"));
+//        classes.add(new XmlClass("com.TestSearchEntities"));
+//        classes.add(new XmlClass("com.TestCollection"));
+//        classes.add(new XmlClass("com.TestCollectionCount"));
+//        classes.add(new XmlClass("com.TestFlush"));
+//        classes.add(new XmlClass("com.TestPartition"));
+//        classes.add(new XmlClass("com.TestGetEntityByID"));
+//        classes.add(new XmlClass("com.TestCollectionInfo"));
+//        classes.add(new XmlClass("com.TestSearchByIds"));
+        classes.add(new XmlClass("com.TestBeforeAndAfter"));
 
         test.setXmlClasses(classes) ;
 

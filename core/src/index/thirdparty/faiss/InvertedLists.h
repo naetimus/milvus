@@ -19,7 +19,6 @@
 #include <vector>
 #include <faiss/Index.h>
 
-
 #ifndef USE_CPU
 namespace faiss {
 
@@ -112,6 +111,12 @@ struct InvertedLists {
            size_t list_no, size_t n_entry,
            const idx_t* ids, const uint8_t *code) = 0;
 
+    /// add one entry to an inverted list without codes
+    virtual size_t add_entry_without_codes (size_t list_no, idx_t theid);
+
+    virtual size_t add_entries_without_codes ( size_t list_no, size_t n_entry,
+                                               const idx_t* ids);
+
     virtual void update_entry (size_t list_no, size_t offset,
                                idx_t id, const uint8_t *code);
 
@@ -123,6 +128,8 @@ struct InvertedLists {
     virtual void reset ();
 
     virtual InvertedLists* to_readonly();
+
+    virtual InvertedLists* to_readonly_without_codes();
 
     virtual bool is_readonly() const;
 
@@ -198,6 +205,11 @@ struct InvertedLists {
             list_no (list_no)
         {}
 
+        // For codes outside
+        ScopedCodes (const InvertedLists *il, size_t list_no, const uint8_t *original_codes):
+            il (il), codes (original_codes), list_no (list_no)
+        {}
+
         const uint8_t *get() {return codes; }
 
         ~ScopedCodes () {
@@ -224,12 +236,18 @@ struct ArrayInvertedLists: InvertedLists {
            size_t list_no, size_t n_entry,
            const idx_t* ids, const uint8_t *code) override;
 
+    size_t add_entries_without_codes ( 
+           size_t list_no, size_t n_entry,
+           const idx_t* ids) override;
+
     void update_entries (size_t list_no, size_t offset, size_t n_entry,
                          const idx_t *ids, const uint8_t *code) override;
 
     void resize (size_t list_no, size_t new_size) override;
 
     InvertedLists* to_readonly() override;
+
+    InvertedLists* to_readonly_without_codes() override;
 
     virtual ~ArrayInvertedLists ();
 };
@@ -249,6 +267,7 @@ struct ReadOnlyArrayInvertedLists: InvertedLists {
 
     ReadOnlyArrayInvertedLists(size_t nlist, size_t code_size, const std::vector<size_t>& list_length);
     explicit ReadOnlyArrayInvertedLists(const ArrayInvertedLists& other);
+    explicit ReadOnlyArrayInvertedLists(const ArrayInvertedLists& other, bool offset);
 
     // Use default copy construct, just copy pointer, DON'T COPY pin_readonly_codes AND pin_readonly_ids
 //    explicit ReadOnlyArrayInvertedLists(const ReadOnlyArrayInvertedLists &);
@@ -267,6 +286,10 @@ struct ReadOnlyArrayInvertedLists: InvertedLists {
             size_t list_no, size_t n_entry,
             const idx_t* ids, const uint8_t *code) override;
 
+    size_t add_entries_without_codes ( 
+            size_t list_no, size_t n_entry,
+            const idx_t* ids) override;
+
     void update_entries (size_t list_no, size_t offset, size_t n_entry,
                          const idx_t *ids, const uint8_t *code) override;
 
@@ -276,6 +299,7 @@ struct ReadOnlyArrayInvertedLists: InvertedLists {
 
     bool is_valid();
 };
+
 /*****************************************************************
  * Meta-inverted lists
  *
@@ -291,6 +315,10 @@ struct ReadOnlyInvertedLists: InvertedLists {
     size_t add_entries (
            size_t list_no, size_t n_entry,
            const idx_t* ids, const uint8_t *code) override;
+
+    size_t add_entries_without_codes ( 
+           size_t list_no, size_t n_entry,
+           const idx_t* ids) override;
 
     void update_entries (size_t list_no, size_t offset, size_t n_entry,
                          const idx_t *ids, const uint8_t *code) override;

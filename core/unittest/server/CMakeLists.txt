@@ -11,61 +11,32 @@
 # or implied. See the License for the specific language governing permissions and limitations under the License.
 #-------------------------------------------------------------------------------
 
-set(test_files
-        ${CMAKE_CURRENT_SOURCE_DIR}/test_cache.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/test_config.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/test_rpc.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/test_web.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/test_util.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/utils.cpp)
+set( TEST_FILES
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_web.cpp
+                )
 
-include_directories("${CUDA_TOOLKIT_ROOT_DIR}/include")
-link_directories("${CUDA_TOOLKIT_ROOT_DIR}/lib64")
+add_executable( test_server
+            ${TEST_FILES}
+            ${SCHEDULER_FILES}
+                # ${grpc_server_files}
+                # ${grpc_service_files}
+#                ${web_server_files}
+                # ${server_delivery_files}
+                # ${server_files}
+                # ${server_init_files}
+                )
 
-include_directories(${MILVUS_ENGINE_SRC}/grpc/gen-status)
-include_directories(${MILVUS_ENGINE_SRC}/grpc/gen-milvus)
+target_link_libraries( test_server
+                            ${UNITTEST_LIBS}
+                                server
+                                 milvus_engine
+                                 metrics
+                                 config
+                                 stdc++
+                                 utils
+                                 tracing
+                                 query
+                                 log
+                                )
 
-set(util_files
-        ${MILVUS_ENGINE_SRC}/utils/StringHelpFunctions.cpp
-        ${MILVUS_ENGINE_SRC}/utils/LogUtil.cpp
-        ${MILVUS_ENGINE_SRC}/utils/SignalUtil.cpp)
-
-set(grpc_service_files
-        ${MILVUS_ENGINE_SRC}/grpc/gen-milvus/milvus.grpc.pb.cc
-        ${MILVUS_ENGINE_SRC}/grpc/gen-milvus/milvus.pb.cc
-        ${MILVUS_ENGINE_SRC}/grpc/gen-status/status.grpc.pb.cc
-        ${MILVUS_ENGINE_SRC}/grpc/gen-status/status.pb.cc
-        )
-
-set(server_test_files
-        ${common_files}
-        ${server_files}
-        ${grpc_server_files}
-        ${grpc_service_files}
-        ${server_delivery_files}
-        ${web_server_files}
-        ${util_files}
-        ${entry_file}
-        ${test_files}
-        )
-
-add_executable(test_server ${server_test_files})
-
-set(grpc_lib
-        grpcpp_channelz
-        grpc++
-        grpc
-        grpc_protobuf
-        grpc_protoc
-        )
-
-target_link_libraries(test_server
-        knowhere
-        metrics
-        stdc++
-        ${grpc_lib}
-        ${unittest_libs}
-        oatpp
-        )
-
-install(TARGETS test_server DESTINATION unittest)
+install( TARGETS test_server DESTINATION unittest )

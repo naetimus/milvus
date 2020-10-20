@@ -12,7 +12,6 @@
 #pragma once
 
 #include <grpcpp/server_context.h>
-#include <server/context/Context.h>
 
 #include <cstdint>
 #include <map>
@@ -24,7 +23,8 @@
 #include "grpc/gen-milvus/milvus.grpc.pb.h"
 #include "grpc/gen-status/status.pb.h"
 #include "opentracing/tracer.h"
-#include "server/delivery/RequestHandler.h"
+#include "server/context/Context.h"
+#include "server/delivery/ReqHandler.h"
 #include "server/grpc_impl/interceptor/GrpcInterceptorHookHandler.h"
 #include "src/utils/Status.h"
 
@@ -57,7 +57,7 @@ namespace grpc {
 ::milvus::grpc::ErrorCode
 ErrorMap(ErrorCode code);
 
-static const char* EXTRA_PARAM_KEY = "params";
+extern const char* EXTRA_PARAM_KEY;
 
 class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, public GrpcInterceptorHookHandler {
  public:
@@ -71,7 +71,7 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     OnPreSendMessage(::grpc::experimental::ServerRpcInfo* server_rpc_info,
                      ::grpc::experimental::InterceptorBatchMethods* interceptor_batch_methods) override;
 
-    const std::shared_ptr<Context>&
+    std::shared_ptr<Context>
     GetContext(::grpc::ServerContext* server_context);
 
     void
@@ -87,7 +87,7 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     //
     // @return Status
     ::grpc::Status
-    CreateCollection(::grpc::ServerContext* context, const ::milvus::grpc::CollectionSchema* request,
+    CreateCollection(::grpc::ServerContext* context, const ::milvus::grpc::Mapping* request,
                      ::milvus::grpc::Status* response) override;
     // *
     // @brief This method is used to test collection existence.
@@ -106,7 +106,7 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     // @return CollectionSchema
     ::grpc::Status
     DescribeCollection(::grpc::ServerContext* context, const ::milvus::grpc::CollectionName* request,
-                       ::milvus::grpc::CollectionSchema* response) override;
+                       ::milvus::grpc::Mapping* response) override;
     // *
     // @brief This method is used to get collection schema.
     //
@@ -160,7 +160,7 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     //
     // @return IndexParam
     ::grpc::Status
-    DescribeIndex(::grpc::ServerContext* context, const ::milvus::grpc::CollectionName* request,
+    DescribeIndex(::grpc::ServerContext* context, const ::milvus::grpc::IndexParam* request,
                   ::milvus::grpc::IndexParam* response) override;
     // *
     // @brief This method is used to drop index
@@ -169,7 +169,7 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     //
     // @return Status
     ::grpc::Status
-    DropIndex(::grpc::ServerContext* context, const ::milvus::grpc::CollectionName* request,
+    DropIndex(::grpc::ServerContext* context, const ::milvus::grpc::IndexParam* request,
               ::milvus::grpc::Status* response) override;
     // *
     // @brief This method is used to create partition
@@ -180,6 +180,17 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     ::grpc::Status
     CreatePartition(::grpc::ServerContext* context, const ::milvus::grpc::PartitionParam* request,
                     ::milvus::grpc::Status* response) override;
+
+    // *
+    // @brief This method is used to test partition existence.
+    //
+    // @param PartitionParam, target partition.
+    //
+    // @return BoolReply
+    ::grpc::Status
+    HasPartition(::grpc::ServerContext* context, const ::milvus::grpc::PartitionParam* request,
+                 ::milvus::grpc::BoolReply* response);
+
     // *
     // @brief This method is used to show partition information
     //
@@ -206,16 +217,17 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     // @return VectorIds
     ::grpc::Status
     Insert(::grpc::ServerContext* context, const ::milvus::grpc::InsertParam* request,
-           ::milvus::grpc::VectorIds* response) override;
+           ::milvus::grpc::EntityIds* response) override;
     // *
-    // @brief This method is used to get vector data by id.
+    // @brief This method is used to get vectors data by id array.
     //
-    // @param VectorIdentity, target vector id.
+    // @param VectorsIdentity, target vector id array.
     //
-    // @return VectorData
+    // @return VectorsData
     ::grpc::Status
-    GetVectorByID(::grpc::ServerContext* context, const ::milvus::grpc::VectorIdentity* request,
-                  ::milvus::grpc::VectorData* response);
+    GetEntityByID(::grpc::ServerContext* context, const ::milvus::grpc::EntityIdentity* request,
+                  ::milvus::grpc::Entities* response) override;
+
     // *
     // @brief This method is used to get vector ids from a segment
     //
@@ -223,8 +235,8 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     //
     // @return VectorIds
     ::grpc::Status
-    GetVectorIDs(::grpc::ServerContext* context, const ::milvus::grpc::GetVectorIDsParam* request,
-                 ::milvus::grpc::VectorIds* response);
+    GetEntityIDs(::grpc::ServerContext* context, const ::milvus::grpc::GetEntityIDsParam* request,
+                 ::milvus::grpc::EntityIds* response) override;
     // *
     // @brief This method is used to query vector in collection.
     //
@@ -233,17 +245,7 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     // @return TopKQueryResultList
     ::grpc::Status
     Search(::grpc::ServerContext* context, const ::milvus::grpc::SearchParam* request,
-           ::milvus::grpc::TopKQueryResult* response) override;
-
-    // *
-    // @brief This method is used to query vector by id.
-    //
-    // @param SearchByIDParam, search parameters.
-    //
-    // @return TopKQueryResult
-    ::grpc::Status
-    SearchByID(::grpc::ServerContext* context, const ::milvus::grpc::SearchByIDParam* request,
-               ::milvus::grpc::TopKQueryResult* response);
+           ::milvus::grpc::QueryResult* response) override;
 
     // *
     // @brief This method is used to query vector in specified files.
@@ -252,8 +254,8 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     //
     // @return TopKQueryResultList
     ::grpc::Status
-    SearchInFiles(::grpc::ServerContext* context, const ::milvus::grpc::SearchInFilesParam* request,
-                  ::milvus::grpc::TopKQueryResult* response) override;
+    SearchInSegment(::grpc::ServerContext* context, const ::milvus::grpc::SearchInSegmentParam* request,
+                    ::milvus::grpc::QueryResult* response) override;
 
     // *
     // @brief This method is used to give the server status.
@@ -273,7 +275,7 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     // @return status
     ::grpc::Status
     DeleteByID(::grpc::ServerContext* context, const ::milvus::grpc::DeleteByIDParam* request,
-               ::milvus::grpc::Status* response);
+               ::milvus::grpc::Status* response) override;
 
     // *
     // @brief This method is used to preload collection
@@ -292,7 +294,8 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     //
     // @return Status
     ::grpc::Status
-    Flush(::grpc::ServerContext* context, const ::milvus::grpc::FlushParam* request, ::milvus::grpc::Status* response);
+    Flush(::grpc::ServerContext* context, const ::milvus::grpc::FlushParam* request,
+          ::milvus::grpc::Status* response) override;
 
     // *
     // @brief This method is used to compact collection
@@ -301,95 +304,53 @@ class GrpcRequestHandler final : public ::milvus::grpc::MilvusService::Service, 
     //
     // @return Status
     ::grpc::Status
-    Compact(::grpc::ServerContext* context, const ::milvus::grpc::CollectionName* request,
-            ::milvus::grpc::Status* response);
+    Compact(::grpc::ServerContext* context, const ::milvus::grpc::CompactParam* request,
+            ::milvus::grpc::Status* response) override;
 
     /*******************************************New Interface*********************************************/
 
     ::grpc::Status
-    CreateHybridCollection(::grpc::ServerContext* context, const ::milvus::grpc::Mapping* request,
-                           ::milvus::grpc::Status* response) override;
+    SearchPB(::grpc::ServerContext* context, const ::milvus::grpc::SearchParamPB* request,
+             ::milvus::grpc::QueryResult* response) override;
 
-    //    ::grpc::Status
-    //    HasCollection(::grpc::ServerContext* context,
-    //                  const ::milvus::grpc::CollectionName* request,
-    //                  ::milvus::grpc::BoolReply* response) override;
-    //
-    //    ::grpc::Status
-    //    DropCollection(::grpc::ServerContext* context,
-    //                   const ::milvus::grpc::CollectionName* request,
-    //                   ::milvus::grpc::Status* response) override;
-    //
-    //    ::grpc::Status
-    //    DescribeCollection(::grpc::ServerContext* context,
-    //                       const ::milvus::grpc::CollectionName* request,
-    //                       ::milvus::grpc::Mapping* response) override;
-    //
-    //    ::grpc::Status
-    //    CountCollection(::grpc::ServerContext* context,
-    //                    const ::milvus::grpc::CollectionName* request,
-    //                    ::milvus::grpc::CollectionRowCount* response) override;
-    //
-    //    ::grpc::Status
-    //    ShowCollections(::grpc::ServerContext* context,
-    //                    const ::milvus::grpc::Command* request,
-    //                    ::milvus::grpc::MappingList* response) override;
-    //
-    //    ::grpc::Status
-    //    ShowCollectionInfo(::grpc::ServerContext* context,
-    //                       const ::milvus::grpc::CollectionName* request,
-    //                       ::milvus::grpc::CollectionInfo* response) override;
-    //
-    //    ::grpc::Status
-    //    PreloadCollection(::grpc::ServerContext* context,
-    //                      const ::milvus::grpc::CollectionName* request,
-    //                      ::milvus::grpc::Status* response) override;
-    //
-    ::grpc::Status
-    InsertEntity(::grpc::ServerContext* context, const ::milvus::grpc::HInsertParam* request,
-                 ::milvus::grpc::HEntityIDs* response) override;
-
-    ::grpc::Status
-    HybridSearch(::grpc::ServerContext* context, const ::milvus::grpc::HSearchParam* request,
-                 ::milvus::grpc::TopKQueryResult* response) override;
-    //
-    //    ::grpc::Status
-    //    HybridSearchInSegments(::grpc::ServerContext* context,
-    //                           const ::milvus::
-    //                           grpc::HSearchInSegmentsParam* request,
-    //                           ::milvus::grpc::HQueryResult* response) override;
-    //
-    //    ::grpc::Status
-    //    GetEntityByID(::grpc::ServerContext* context,
-    //                  const ::milvus::grpc::HEntityIdentity* request,
-    //                  ::milvus::grpc::HEntity* response) override;
-    //
-    //    ::grpc::Status
-    //    GetEntityIDs(::grpc::ServerContext* context,
-    //                 const ::milvus::grpc::HGetEntityIDsParam* request,
-    //                 ::milvus::grpc::HEntityIDs* response) override;
-    //
-    //    ::grpc::Status
-    //    DeleteEntitiesByID(::grpc::ServerContext* context,
-    //                       const ::milvus::grpc::HDeleteByIDParam* request,
-    //                       ::milvus::grpc::Status* response) override;
-
-    GrpcRequestHandler&
-    RegisterRequestHandler(const RequestHandler& handler) {
-        request_handler_ = handler;
+    void
+    RegisterRequestHandler(const ReqHandler& handler) {
+        req_handler_ = handler;
     }
 
- private:
-    RequestHandler request_handler_;
+    Status
+    DeserializeJsonToBoolQuery(const google::protobuf::RepeatedPtrField<::milvus::grpc::VectorParam>& vector_params,
+                               const std::string& dsl_string, query::BooleanQueryPtr& boolean_query,
+                               query::QueryPtr& query_ptr);
 
-    // std::unordered_map<::grpc::ServerContext*, std::shared_ptr<Context>> context_map_;
+    Status
+    ProcessBooleanQueryJson(const milvus::json& query_json, query::BooleanQueryPtr& boolean_query,
+                            query::QueryPtr& query_ptr);
+
+    Status
+    ProcessLeafQueryJson(const milvus::json& query_json, query::BooleanQueryPtr& query, std::string& field_name);
+
+ private:
+    void
+    WaitToInsert(const std::string& request_id, int64_t request_size);
+
+    void
+    FinishInsert(const std::string& request_id, int64_t request_size);
+
+ private:
+    ReqHandler req_handler_;
+
     std::unordered_map<std::string, std::shared_ptr<Context>> context_map_;
     std::shared_ptr<opentracing::Tracer> tracer_;
-    //    std::unordered_map<::grpc::ServerContext*, std::unique_ptr<opentracing::Span>> span_map_;
 
     mutable std::mt19937_64 random_num_generator_;
     mutable std::mutex random_mutex_;
     mutable std::mutex context_map_mutex_;
+
+    mutable std::mutex max_concurrent_insert_request_mutex;
+    std::condition_variable insert_event_cv_;
+    const int64_t max_concurrent_insert_request_size_;
+    int64_t max_concurrent_insert_request_size = 0;
 };
 
 }  // namespace grpc

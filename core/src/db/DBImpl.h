@@ -12,9 +12,7 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <list>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -23,24 +21,16 @@
 #include <unordered_map>
 #include <vector>
 
-#include "config/handler/CacheConfigHandler.h"
-#include "config/handler/EngineConfigHandler.h"
 #include "db/DB.h"
-#include "db/IndexFailedChecker.h"
-#include "db/OngoingFileChecker.h"
-#include "db/Types.h"
-#include "db/insert/MemManager.h"
+#include "db/SegmentTaskTracker.h"
+
+#include "config/ConfigMgr.h"
 #include "utils/ThreadPool.h"
-#include "wal/WalManager.h"
 
 namespace milvus {
 namespace engine {
 
-namespace meta {
-class Meta;
-}
-
-class DBImpl : public DB, public server::CacheConfigHandler, public server::EngineConfigHandler {
+class DBImpl : public DB, public ConfigObserver {
  public:
     explicit DBImpl(const DBOptions& options);
 
@@ -53,313 +43,182 @@ class DBImpl : public DB, public server::CacheConfigHandler, public server::Engi
     Stop() override;
 
     Status
-    DropAll() override;
+    CreateCollection(const snapshot::CreateCollectionContext& context) override;
 
     Status
-    CreateCollection(meta::CollectionSchema& collection_schema) override;
+    DropCollection(const std::string& collection_name) override;
 
     Status
-    DropCollection(const std::string& collection_id) override;
+    HasCollection(const std::string& collection_name, bool& has_or_not) override;
 
     Status
-    DescribeCollection(meta::CollectionSchema& collection_schema) override;
+    ListCollections(std::vector<std::string>& names) override;
 
     Status
-    HasCollection(const std::string& collection_id, bool& has_or_not) override;
+    GetCollectionInfo(const std::string& collection_name, snapshot::CollectionPtr& collection,
+                      snapshot::FieldElementMappings& fields_schema) override;
 
     Status
-    HasNativeCollection(const std::string& collection_id, bool& has_or_not_) override;
+    GetCollectionStats(const std::string& collection_name, milvus::json& collection_stats) override;
 
     Status
-    AllCollections(std::vector<meta::CollectionSchema>& collection_schema_array) override;
+    CountEntities(const std::string& collection_name, int64_t& row_count) override;
 
     Status
-    GetCollectionInfo(const std::string& collection_id, CollectionInfo& collection_info) override;
+    CreatePartition(const std::string& collection_name, const std::string& partition_name) override;
 
     Status
-    PreloadCollection(const std::string& collection_id) override;
+    DropPartition(const std::string& collection_name, const std::string& partition_name) override;
 
     Status
-    UpdateCollectionFlag(const std::string& collection_id, int64_t flag) override;
+    HasPartition(const std::string& collection_name, const std::string& partition_tag, bool& exist) override;
 
     Status
-    GetCollectionRowCount(const std::string& collection_id, uint64_t& row_count) override;
+    ListPartitions(const std::string& collection_name, std::vector<std::string>& partition_names) override;
 
     Status
-    CreatePartition(const std::string& collection_id, const std::string& partition_name,
-                    const std::string& partition_tag) override;
+    CreateIndex(const std::shared_ptr<server::Context>& context, const std::string& collection_name,
+                const std::string& field_name, const CollectionIndex& index) override;
 
     Status
-    DropPartition(const std::string& partition_name) override;
+    DropIndex(const std::string& collection_name, const std::string& field_name) override;
 
     Status
-    DropPartitionByTag(const std::string& collection_id, const std::string& partition_tag) override;
+    DescribeIndex(const std::string& collection_name, const std::string& field_name, CollectionIndex& index) override;
+
+    // Note: the data_chunk will be consumed with this method, and only return id field to client
+    Status
+    Insert(const std::string& collection_name, const std::string& partition_name, DataChunkPtr& data_chunk,
+           idx_t op_id) override;
 
     Status
-    ShowPartitions(const std::string& collection_id,
-                   std::vector<meta::CollectionSchema>& partition_schema_array) override;
+    GetEntityByID(const std::string& collection_name, const IDNumbers& id_array,
+                  const std::vector<std::string>& field_names, std::vector<bool>& valid_row,
+                  DataChunkPtr& data_chunk) override;
 
     Status
-    InsertVectors(const std::string& collection_id, const std::string& partition_tag, VectorsData& vectors) override;
+    DeleteEntityByID(const std::string& collection_name, const engine::IDNumbers& entity_ids, idx_t op_id) override;
 
     Status
-    DeleteVector(const std::string& collection_id, IDNumber vector_id) override;
+    Query(const server::ContextPtr& context, const query::QueryPtr& query_ptr, engine::QueryResultPtr& result) override;
 
     Status
-    DeleteVectors(const std::string& collection_id, IDNumbers vector_ids) override;
+    ListIDInSegment(const std::string& collection_name, int64_t segment_id, IDNumbers& entity_ids) override;
+
+    // Note: if the input field_names is empty, will load all fields of this collection
+    Status
+    LoadCollection(const server::ContextPtr& context, const std::string& collection_name,
+                   const std::vector<std::string>& field_names, bool force) override;
 
     Status
-    Flush(const std::string& collection_id) override;
+    Flush(const std::string& collection_name) override;
 
     Status
     Flush() override;
 
+    // Note: the threshold is percent of deleted entities that trigger compact action,
+    // default is 0.0, means compact will create a new segment even only one entity is deleted
     Status
-    Compact(const std::string& collection_id) override;
-
-    Status
-    GetVectorByID(const std::string& collection_id, const IDNumber& vector_id, VectorsData& vector) override;
-
-    Status
-    GetVectorIDs(const std::string& collection_id, const std::string& segment_id, IDNumbers& vector_ids) override;
-
-    //    Status
-    //    Merge(const std::set<std::string>& collection_ids) override;
-
-    Status
-    CreateIndex(const std::string& collection_id, const CollectionIndex& index) override;
-
-    Status
-    DescribeIndex(const std::string& collection_id, CollectionIndex& index) override;
-
-    Status
-    DropIndex(const std::string& collection_id) override;
-
-    Status
-    CreateHybridCollection(meta::CollectionSchema& collection_schema,
-                           meta::hybrid::FieldsSchema& fields_schema) override;
-
-    Status
-    DescribeHybridCollection(meta::CollectionSchema& collection_schema,
-                             meta::hybrid::FieldsSchema& fields_schema) override;
-
-    Status
-    InsertEntities(const std::string& collection_name, const std::string& partition_tag, engine::Entity& entity,
-                   std::unordered_map<std::string, meta::hybrid::DataType>& field_types) override;
-
-    Status
-    HybridQuery(const std::shared_ptr<server::Context>& context, const std::string& collection_id,
-                const std::vector<std::string>& partition_tags, context::HybridSearchContextPtr hybrid_search_context,
-                query::GeneralQueryPtr general_query,
-                std::unordered_map<std::string, engine::meta::hybrid::DataType>& attr_type, uint64_t& nq,
-                ResultIds& result_ids, ResultDistances& result_distances) override;
-
-    Status
-    QueryByID(const std::shared_ptr<server::Context>& context, const std::string& collection_id,
-              const std::vector<std::string>& partition_tags, uint64_t k, const milvus::json& extra_params,
-              IDNumber vector_id, ResultIds& result_ids, ResultDistances& result_distances) override;
-
-    Status
-    Query(const std::shared_ptr<server::Context>& context, const std::string& collection_id,
-          const std::vector<std::string>& partition_tags, uint64_t k, const milvus::json& extra_params,
-          const VectorsData& vectors, ResultIds& result_ids, ResultDistances& result_distances) override;
-
-    Status
-    QueryByFileID(const std::shared_ptr<server::Context>& context, const std::vector<std::string>& file_ids, uint64_t k,
-                  const milvus::json& extra_params, const VectorsData& vectors, ResultIds& result_ids,
-                  ResultDistances& result_distances) override;
-
-    Status
-    Size(uint64_t& result) override;
-
- protected:
-    void
-    OnCacheInsertDataChanged(bool value) override;
+    Compact(const server::ContextPtr& context, const std::string& collection_name, double threshold) override;
 
     void
-    OnUseBlasThresholdChanged(int64_t threshold) override;
+    ConfigUpdate(const std::string& name) override;
+
+    bool
+    IsBuildingIndex() override;
 
  private:
-    Status
-    QueryAsync(const std::shared_ptr<server::Context>& context, const meta::SegmentsSchema& files, uint64_t k,
-               const milvus::json& extra_params, const VectorsData& vectors, ResultIds& result_ids,
-               ResultDistances& result_distances);
-
-    Status
-    HybridQueryAsync(const std::shared_ptr<server::Context>& context, const std::string& table_id,
-                     const meta::SegmentsSchema& files, context::HybridSearchContextPtr hybrid_search_context,
-                     query::GeneralQueryPtr general_query,
-                     std::unordered_map<std::string, engine::meta::hybrid::DataType>& attr_type, uint64_t& nq,
-                     ResultIds& result_ids, ResultDistances& result_distances);
-
-    Status
-    GetVectorByIdHelper(const std::string& collection_id, IDNumber vector_id, VectorsData& vector,
-                        const meta::SegmentsSchema& files);
+    bool
+    ServiceAvailable();
 
     void
-    InternalFlush(const std::string& collection_id = "");
+    SetAvailable(bool available);
 
     void
-    BackgroundWalThread();
+    InternalFlush(const std::string& collection_name = "", bool merge = true);
 
     void
-    BackgroundFlushThread();
-
-    void
-    BackgroundMetricThread();
-
-    void
-    BackgroundIndexThread();
-
-    void
-    WaitMergeFileFinish();
-
-    void
-    WaitBuildIndexFinish();
+    TimingFlushThread();
 
     void
     StartMetricTask();
 
     void
-    StartMergeTask();
-
-    Status
-    MergeFiles(const std::string& collection_id, const meta::SegmentsSchema& files);
-
-    Status
-    BackgroundMergeFiles(const std::string& collection_id);
+    TimingMetricThread();
 
     void
-    BackgroundMerge(std::set<std::string> collection_ids);
-
-    Status
-    MergeHybridFiles(const std::string& table_id, const meta::SegmentsSchema& files);
+    StartBuildIndexTask(const std::vector<std::string>& collection_names, bool force_build);
 
     void
-    StartBuildIndexTask();
+    BackgroundBuildIndexTask(std::vector<std::string> collection_names, bool force_build);
 
     void
-    BackgroundBuildIndex();
+    TimingIndexThread();
 
-    Status
-    CompactFile(const std::string& collection_id, const meta::SegmentSchema& file,
-                meta::SegmentsSchema& files_to_update);
+    void
+    WaitBuildIndexFinish();
 
-    /*
-    Status
-    SyncMemData(std::set<std::string>& sync_collection_ids);
-    */
+    void
+    StartMergeTask(const std::set<int64_t>& collection_ids, bool force_merge_all);
 
-    Status
-    GetFilesToBuildIndex(const std::string& collection_id, const std::vector<int>& file_types,
-                         meta::SegmentsSchema& files);
+    void
+    BackgroundMerge(std::set<int64_t> collection_ids, bool force_merge_all);
 
-    Status
-    GetFilesToSearch(const std::string& collection_id, meta::SegmentsSchema& files);
+    void
+    WaitMergeFileFinish();
 
-    Status
-    GetPartitionByTag(const std::string& collection_id, const std::string& partition_tag, std::string& partition_name);
+    void
+    SuspendIfFirst();
 
-    Status
-    GetPartitionsByTags(const std::string& collection_id, const std::vector<std::string>& partition_tags,
-                        std::set<std::string>& partition_name_array);
+    void
+    ResumeIfLast();
 
-    Status
-    DropCollectionRecursively(const std::string& collection_id);
+    void
+    IncreaseLiveBuildTaskNum();
 
-    Status
-    UpdateCollectionIndexRecursively(const std::string& collection_id, const CollectionIndex& index);
-
-    Status
-    WaitCollectionIndexRecursively(const std::string& collection_id, const CollectionIndex& index);
-
-    Status
-    DropCollectionIndexRecursively(const std::string& collection_id);
-
-    Status
-    GetCollectionRowCountRecursively(const std::string& collection_id, uint64_t& row_count);
-
-    Status
-    ExecWalRecord(const wal::MXLogRecord& record);
+    void
+    DecreaseLiveBuildTaskNum();
 
  private:
     DBOptions options_;
+    std::atomic<bool> available_;
 
-    std::atomic<bool> initialized_;
-
-    meta::MetaPtr meta_ptr_;
     MemManagerPtr mem_mgr_;
-
-    std::shared_ptr<wal::WalManager> wal_mgr_;
-    std::thread bg_wal_thread_;
+    MergeManagerPtr merge_mgr_ptr_;
 
     std::thread bg_flush_thread_;
     std::thread bg_metric_thread_;
     std::thread bg_index_thread_;
 
-    struct SimpleWaitNotify {
-        bool notified_ = false;
-        std::mutex mutex_;
-        std::condition_variable cv_;
-
-        void
-        Wait() {
-            std::unique_lock<std::mutex> lck(mutex_);
-            if (!notified_) {
-                cv_.wait(lck);
-            }
-            notified_ = false;
-        }
-
-        void
-        Wait_Until(const std::chrono::system_clock::time_point& tm_pint) {
-            std::unique_lock<std::mutex> lck(mutex_);
-            if (!notified_) {
-                cv_.wait_until(lck, tm_pint);
-            }
-            notified_ = false;
-        }
-
-        void
-        Wait_For(const std::chrono::system_clock::duration& tm_dur) {
-            std::unique_lock<std::mutex> lck(mutex_);
-            if (!notified_) {
-                cv_.wait_for(lck, tm_dur);
-            }
-            notified_ = false;
-        }
-
-        void
-        Notify() {
-            std::unique_lock<std::mutex> lck(mutex_);
-            notified_ = true;
-            lck.unlock();
-            cv_.notify_one();
-        }
-    };
-
-    SimpleWaitNotify swn_wal_;
     SimpleWaitNotify swn_flush_;
     SimpleWaitNotify swn_metric_;
     SimpleWaitNotify swn_index_;
 
     SimpleWaitNotify flush_req_swn_;
+    SimpleWaitNotify index_req_swn_;
 
     ThreadPool merge_thread_pool_;
     std::mutex merge_result_mutex_;
     std::list<std::future<void>> merge_thread_results_;
-    std::set<std::string> merge_collection_ids_;
 
     ThreadPool index_thread_pool_;
     std::mutex index_result_mutex_;
     std::list<std::future<void>> index_thread_results_;
 
+    SegmentTaskTracker index_task_tracker_;
+
     std::mutex build_index_mutex_;
 
-    IndexFailedChecker index_failed_checker_;
-
     std::mutex flush_merge_compact_mutex_;
-};  // DBImpl
+
+    int64_t live_search_num_ = 0;
+    std::mutex suspend_build_mutex_;
+
+    int64_t live_build_num_ = 0;
+    std::mutex live_build_count_mutex_;
+};  // SSDBImpl
+
+using DBImplPtr = std::shared_ptr<DBImpl>;
 
 }  // namespace engine
 }  // namespace milvus

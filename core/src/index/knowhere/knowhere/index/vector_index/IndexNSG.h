@@ -27,7 +27,7 @@ class NsgIndex;
 
 class NSG : public VecIndex {
  public:
-    explicit NSG(const int64_t& gpu_num = -1) : gpu_(gpu_num) {
+    explicit NSG(const int64_t gpu_num = -1) : gpu_(gpu_num) {
         if (gpu_ >= 0) {
             index_mode_ = IndexMode::MODE_GPU;
         }
@@ -35,7 +35,7 @@ class NSG : public VecIndex {
     }
 
     BinarySet
-    Serialize(const Config& config = Config()) override;
+    Serialize(const Config&) override;
 
     void
     Load(const BinarySet&) override;
@@ -59,7 +59,7 @@ class NSG : public VecIndex {
     }
 
     DatasetPtr
-    Query(const DatasetPtr&, const Config&) override;
+    Query(const DatasetPtr&, const Config&, const faiss::ConcurrentBitsetPtr&) override;
 
     int64_t
     Count() override;

@@ -28,7 +28,7 @@ class CPUSPTAGRNG : public VecIndex {
 
  public:
     BinarySet
-    Serialize(const Config& config = Config()) override;
+    Serialize(const Config& config) override;
 
     void
     Load(const BinarySet& index_array) override;
@@ -52,13 +52,16 @@ class CPUSPTAGRNG : public VecIndex {
     }
 
     DatasetPtr
-    Query(const DatasetPtr& dataset_ptr, const Config& config) override;
+    Query(const DatasetPtr& dataset_ptr, const Config& config, const faiss::ConcurrentBitsetPtr& bitset) override;
 
     int64_t
     Count() override;
 
     int64_t
     Dim() override;
+
+    void
+    UpdateIndexSize() override;
 
  private:
     void

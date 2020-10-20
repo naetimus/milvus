@@ -10,397 +10,569 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
 #include "db/wal/WalManager.h"
-
-#include <unistd.h>
-
-#include <algorithm>
-#include <memory>
-
-#include "config/Config.h"
+#include "config/ServerConfig.h"
+#include "db/Utils.h"
+#include "db/wal/WalOperationCodec.h"
 #include "utils/CommonUtil.h"
-#include "utils/Exception.h"
 #include "utils/Log.h"
+
+#include <map>
+#include <memory>
+#include <utility>
+
+#include <experimental/filesystem>
 
 namespace milvus {
 namespace engine {
-namespace wal {
 
-WalManager::WalManager(const MXLogConfiguration& config) {
-    __glibcxx_assert(config.buffer_size <= milvus::server::CONFIG_WAL_BUFFER_SIZE_MAX / 2);
-    __glibcxx_assert(config.buffer_size >= milvus::server::CONFIG_WAL_BUFFER_SIZE_MIN / 2);
+const char* WAL_MAX_OP_FILE_NAME = "max_op";
+const char* WAL_DEL_FILE_NAME = "del";
 
-    mxlog_config_.recovery_error_ignore = config.recovery_error_ignore;
-    mxlog_config_.buffer_size = config.buffer_size;
-    mxlog_config_.mxlog_path = config.mxlog_path;
+namespace {
 
-    // check the path end with '/'
-    if (mxlog_config_.mxlog_path.back() != '/') {
-        mxlog_config_.mxlog_path += '/';
-    }
-    // check path exist
-    auto status = server::CommonUtil::CreateDirectory(mxlog_config_.mxlog_path);
-    if (!status.ok()) {
-        std::string msg = "failed to create wal directory " + mxlog_config_.mxlog_path;
-        LOG_ENGINE_ERROR_ << msg;
-        throw Exception(WAL_PATH_ERROR, msg);
+bool
+StrToID(const std::string& str, idx_t& id) {
+    try {
+        id = std::stol(str);
+        return true;
+    } catch (std::exception& ex) {
+        return false;
     }
 }
 
-WalManager::~WalManager() {
-}
-
-ErrorCode
-WalManager::Init(const meta::MetaPtr& meta) {
-    uint64_t applied_lsn = 0;
-    p_meta_handler_ = std::make_shared<MXLogMetaHandler>(mxlog_config_.mxlog_path);
-    if (p_meta_handler_ != nullptr) {
-        p_meta_handler_->GetMXLogInternalMeta(applied_lsn);
-    }
-
-    uint64_t recovery_start = 0;
-    if (meta != nullptr) {
-        meta->GetGlobalLastLSN(recovery_start);
-
-        std::vector<meta::CollectionSchema> table_schema_array;
-        auto status = meta->AllCollections(table_schema_array);
-        if (!status.ok()) {
-            return WAL_META_ERROR;
+void
+FindWalFiles(const std::experimental::filesystem::path& folder,
+             std::map<idx_t, std::experimental::filesystem::path>& files) {
+    using DirectoryIterator = std::experimental::filesystem::recursive_directory_iterator;
+    DirectoryIterator iter(folder);
+    DirectoryIterator end;
+    for (; iter != end; ++iter) {
+        auto path_inner = (*iter).path();
+        std::string file_name = path_inner.filename().c_str();
+        if (file_name == WAL_MAX_OP_FILE_NAME || file_name == WAL_DEL_FILE_NAME) {
+            continue;
         }
+        idx_t op_id = 0;
+        if (StrToID(file_name, op_id)) {
+            files.insert(std::make_pair(op_id, path_inner));
+        }
+    }
+}
 
-        if (!table_schema_array.empty()) {
-            // get min and max flushed lsn
-            uint64_t min_flused_lsn = table_schema_array[0].flush_lsn_;
-            uint64_t max_flused_lsn = table_schema_array[0].flush_lsn_;
-            for (size_t i = 1; i < table_schema_array.size(); i++) {
-                if (min_flused_lsn > table_schema_array[i].flush_lsn_) {
-                    min_flused_lsn = table_schema_array[i].flush_lsn_;
-                } else if (max_flused_lsn < table_schema_array[i].flush_lsn_) {
-                    max_flused_lsn = table_schema_array[i].flush_lsn_;
+}  // namespace
+
+WalManager::WalManager() : cleanup_thread_pool_(1, 1) {
+}
+
+WalManager&
+WalManager::GetInstance() {
+    static WalManager s_mgr;
+    return s_mgr;
+}
+
+Status
+WalManager::Start(const DBOptions& options) {
+    enable_ = options.wal_enable_;
+    insert_buffer_size_ = options.insert_buffer_size_;
+
+    std::experimental::filesystem::path wal_path(options.wal_path_);
+    wal_path_ = wal_path.c_str();
+    CommonUtil::CreateDirectory(wal_path_);
+
+    auto status = Init();
+    if (!status.ok()) {
+        return status;
+    }
+
+    LOG_ENGINE_DEBUG_ << "WalManager started";
+
+    return Status::OK();
+}
+
+Status
+WalManager::Stop() {
+    {
+        std::lock_guard<std::mutex> lock(file_map_mutex_);
+        file_map_.clear();
+    }
+
+    WaitCleanupFinish();
+
+    LOG_ENGINE_DEBUG_ << "WalManager stopped";
+
+    return Status::OK();
+}
+
+Status
+WalManager::DropCollection(const std::string& collection_name) {
+    // write a placeholder file 'del' under collection folder, let cleanup thread remove this folder
+    std::string path = ConstructFilePath(collection_name, WAL_DEL_FILE_NAME);
+    if (!path.empty()) {
+        WalFile file;
+        file.OpenFile(path, WalFile::OVER_WRITE);
+        idx_t op_id = id_gen_.GetNextIDNumber();
+        file.Write<idx_t>(&op_id);
+
+        AddCleanupTask(collection_name);
+        StartCleanupThread();
+    }
+
+    return Status::OK();
+}
+
+Status
+WalManager::RecordOperation(const WalOperationPtr& operation, const DBPtr& db) {
+    if (operation == nullptr) {
+        return Status(DB_ERROR, "Wal operation is null pointer");
+    }
+
+    Status status;
+    switch (operation->Type()) {
+        case WalOperationType::INSERT_ENTITY: {
+            InsertEntityOperationPtr op = std::static_pointer_cast<InsertEntityOperation>(operation);
+            status = RecordInsertOperation(op, db);
+            break;
+        }
+        case WalOperationType::DELETE_ENTITY: {
+            DeleteEntityOperationPtr op = std::static_pointer_cast<DeleteEntityOperation>(operation);
+            status = RecordDeleteOperation(op, db);
+            break;
+        }
+        default:
+            break;
+    }
+
+    if (!status.ok()) {
+        LOG_ENGINE_DEBUG_ << "Failed to record wal opertiaon: " << status.message();
+    }
+
+    return status;
+}
+
+Status
+WalManager::OperationDone(const std::string& collection_name, idx_t op_id) {
+    if (!enable_) {
+        return Status::OK();
+    }
+
+    bool start_cleanup = false;
+    {
+        // record max operation id for each collection
+        std::lock_guard<std::mutex> lock(max_op_mutex_);
+        idx_t last_id = max_op_id_map_[collection_name];
+        if (op_id > last_id) {
+            max_op_id_map_[collection_name] = op_id;
+            start_cleanup = true;
+
+            // write max op id to disk
+            std::string path = ConstructFilePath(collection_name, WAL_MAX_OP_FILE_NAME);
+            if (!path.empty()) {
+                WalFile file;
+                file.OpenFile(path, WalFile::OVER_WRITE);
+                file.Write<idx_t>(&op_id);
+            }
+        }
+    }
+
+    if (start_cleanup) {
+        AddCleanupTask(collection_name);
+        StartCleanupThread();
+    }
+
+    return Status::OK();
+}
+
+Status
+WalManager::Recovery(const DBPtr& db, const CollectionMaxOpIDMap& max_op_ids) {
+    WaitCleanupFinish();
+
+    if (db == nullptr) {
+        return Status(DB_ERROR, "null pointer");
+    }
+
+    LOG_ENGINE_DEBUG_ << "Begin wal recovery";
+
+    try {
+        using DirectoryIterator = std::experimental::filesystem::recursive_directory_iterator;
+        DirectoryIterator iter_outer(wal_path_);
+        DirectoryIterator end_outer;
+        for (; iter_outer != end_outer; ++iter_outer) {
+            auto path_outer = (*iter_outer).path();
+            if (!std::experimental::filesystem::is_directory(path_outer)) {
+                continue;
+            }
+
+            std::string collection_name = path_outer.filename().c_str();
+
+            // iterate files
+            std::map<idx_t, std::experimental::filesystem::path> id_files;
+            FindWalFiles(path_outer, id_files);
+
+            // the max operation id
+            idx_t max_op_id = 0;
+            {
+                std::lock_guard<std::mutex> lock(max_op_mutex_);
+                if (max_op_id_map_.find(collection_name) != max_op_id_map_.end()) {
+                    max_op_id = max_op_id_map_[collection_name];
                 }
             }
-            if (applied_lsn < max_flused_lsn) {
-                // a new WAL folder?
-                applied_lsn = max_flused_lsn;
-            }
-            if (recovery_start < min_flused_lsn) {
-                // not flush all yet
-                recovery_start = min_flused_lsn;
+
+            auto iter = max_op_ids.find(collection_name);
+            if (iter != max_op_ids.end()) {
+                idx_t outer_max_id = iter->second;
+                max_op_id = outer_max_id > max_op_id ? outer_max_id : max_op_id;
             }
 
-            for (auto& schema : table_schema_array) {
-                TableLsn tb_lsn = {schema.flush_lsn_, applied_lsn};
-                tables_[schema.collection_id_] = tb_lsn;
+            // id_files arrange id in assendent, we know which file should be read
+            for (auto& pair : id_files) {
+                WalFilePtr file = std::make_shared<WalFile>(sync_mode_);
+                file->OpenFile(pair.second.c_str(), WalFile::READ);
+                idx_t last_id = 0;
+                file->ReadLastOpId(last_id);
+                if (last_id <= max_op_id) {
+                    file->CloseFile();
+                    OperationDone(collection_name, max_op_id);
+                    continue;  // skip and delete this file since all its operations already done
+                }
+
+                // read operation and execute
+                Status status = Status::OK();
+                while (status.ok()) {
+                    WalOperationPtr operation;
+                    status = WalOperationCodec::IterateOperation(file, operation, max_op_id);
+                    if (operation) {
+                        operation->collection_name_ = collection_name;
+                        PerformOperation(operation, db);
+                    }
+                }
             }
         }
+
+        // flush to makesure data is serialized
+        auto status = db->Flush();
+        LOG_ENGINE_DEBUG_ << "End wal recovery";
+        return status;
+    } catch (std::exception& ex) {
+        std::string msg = "Failed to recovery wal, reason: " + std::string(ex.what());
+        return Status(DB_ERROR, msg);
     }
-
-    // all tables are droped and a new wal path?
-    if (applied_lsn < recovery_start) {
-        applied_lsn = recovery_start;
-    }
-
-    ErrorCode error_code = WAL_ERROR;
-    p_buffer_ = std::make_shared<MXLogBuffer>(mxlog_config_.mxlog_path, mxlog_config_.buffer_size);
-    if (p_buffer_ != nullptr) {
-        if (p_buffer_->Init(recovery_start, applied_lsn)) {
-            error_code = WAL_SUCCESS;
-        } else if (mxlog_config_.recovery_error_ignore) {
-            p_buffer_->Reset(applied_lsn);
-            error_code = WAL_SUCCESS;
-        } else {
-            error_code = WAL_FILE_ERROR;
-        }
-    }
-
-    // buffer size may changed
-    mxlog_config_.buffer_size = p_buffer_->GetBufferSize();
-
-    last_applied_lsn_ = applied_lsn;
-    return error_code;
 }
 
-ErrorCode
-WalManager::GetNextRecovery(MXLogRecord& record) {
-    ErrorCode error_code = WAL_SUCCESS;
-    while (true) {
-        error_code = p_buffer_->Next(last_applied_lsn_, record);
-        if (error_code != WAL_SUCCESS) {
-            if (mxlog_config_.recovery_error_ignore) {
-                // reset and break recovery
-                p_buffer_->Reset(last_applied_lsn_);
-
-                record.type = MXLogType::None;
-                error_code = WAL_SUCCESS;
-            }
-            break;
-        }
-        if (record.type == MXLogType::None) {
-            break;
-        }
-
-        // background thread has not started.
-        // so, needn't lock here.
-        auto it = tables_.find(record.collection_id);
-        if (it != tables_.end()) {
-            if (it->second.flush_lsn < record.lsn) {
-                break;
-            }
-        }
+idx_t
+WalManager::GetMaxOperationID(const std::string& collection_name) {
+    std::lock_guard<std::mutex> lock(max_op_mutex_);
+    auto pair = max_op_id_map_.find(collection_name);
+    if (pair != max_op_id_map_.end()) {
+        return pair->second;
     }
 
-    LOG_WAL_INFO_ << "record type " << (int32_t)record.type << " record lsn " << record.lsn << " error code  "
-                  << error_code;
-
-    return error_code;
+    return 0;
 }
 
-ErrorCode
-WalManager::GetNextRecord(MXLogRecord& record) {
-    auto check_flush = [&]() -> bool {
-        std::lock_guard<std::mutex> lck(mutex_);
-        if (flush_info_.IsValid()) {
-            if (p_buffer_->GetReadLsn() >= flush_info_.lsn_) {
-                // can exec flush requirement
-                record.type = MXLogType::Flush;
-                record.collection_id = flush_info_.collection_id_;
-                record.lsn = flush_info_.lsn_;
-                flush_info_.Clear();
+Status
+WalManager::Init() {
+    sync_mode_ = config.wal.sync_mode();
 
-                LOG_WAL_INFO_ << "record flush collection " << record.collection_id << " lsn " << record.lsn;
-                return true;
+    try {
+        using DirectoryIterator = std::experimental::filesystem::recursive_directory_iterator;
+        DirectoryIterator iter(wal_path_);
+        DirectoryIterator end;
+        for (; iter != end; ++iter) {
+            auto path = (*iter).path();
+            if (std::experimental::filesystem::is_directory(path)) {
+                std::string collection_name = path.filename().c_str();
+
+                // read max op id
+                std::experimental::filesystem::path file_path = path;
+                file_path.append(WAL_MAX_OP_FILE_NAME);
+                if (std::experimental::filesystem::is_regular_file(file_path)) {
+                    WalFile file;
+                    file.OpenFile(file_path.c_str(), WalFile::READ);
+                    idx_t max_op = 0;
+                    file.Read(&max_op);
+
+                    std::lock_guard<std::mutex> lock(max_op_mutex_);
+                    max_op_id_map_.insert(std::make_pair(collection_name, max_op));
+                }
+
+                // this collection has been deleted?
+                file_path = path;
+                file_path.append(WAL_DEL_FILE_NAME);
+                if (std::experimental::filesystem::is_regular_file(file_path)) {
+                    AddCleanupTask(collection_name);
+                }
             }
         }
-        return false;
-    };
-
-    if (check_flush()) {
-        return WAL_SUCCESS;
+    } catch (std::exception& ex) {
+        std::string msg = "Failed to initial wal, reason: " + std::string(ex.what());
+        return Status(DB_ERROR, msg);
     }
 
-    ErrorCode error_code = WAL_SUCCESS;
-    while (WAL_SUCCESS == p_buffer_->Next(last_applied_lsn_, record)) {
-        if (record.type == MXLogType::None) {
-            if (check_flush()) {
-                return WAL_SUCCESS;
-            }
-            break;
-        }
-
-        std::lock_guard<std::mutex> lck(mutex_);
-        auto it = tables_.find(record.collection_id);
-        if (it != tables_.end()) {
-            if (it->second.flush_lsn < record.lsn) {
-                break;
-            }
-        }
-    }
-
-    LOG_WAL_INFO_ << "record type " << (int32_t)record.type << " collection " << record.collection_id << " lsn "
-                  << record.lsn;
-    return error_code;
+    StartCleanupThread();  // do cleanup
+    return Status::OK();
 }
 
-uint64_t
-WalManager::CreateCollection(const std::string& collection_id) {
-    LOG_WAL_INFO_ << "create collection " << collection_id << " " << last_applied_lsn_;
-    std::lock_guard<std::mutex> lck(mutex_);
-    uint64_t applied_lsn = last_applied_lsn_;
-    tables_[collection_id] = {applied_lsn, applied_lsn};
-    return applied_lsn;
+Status
+WalManager::RecordInsertOperation(const InsertEntityOperationPtr& operation, const DBPtr& db) {
+    idx_t op_id = id_gen_.GetNextIDNumber();
+    operation->SetID(op_id);
+
+    DataChunkPtr& chunk = operation->data_chunk_;
+    int64_t chunk_size = utils::GetSizeOfChunk(chunk);
+
+    try {
+        // open wal file
+        std::string path = ConstructFilePath(operation->collection_name_, std::to_string(op_id));
+        if (!path.empty()) {
+            std::lock_guard<std::mutex> lock(file_map_mutex_);
+            WalFilePtr file = file_map_[operation->collection_name_];
+            if (file == nullptr) {
+                file = std::make_shared<WalFile>(sync_mode_);
+                file_map_[operation->collection_name_] = file;
+                file->OpenFile(path, WalFile::APPEND_WRITE);
+            } else if (!file->IsOpened() || file->ExceedMaxSize(chunk_size)) {
+                file->OpenFile(path, WalFile::APPEND_WRITE);
+            }
+
+            // write to wal file
+            auto status = WalOperationCodec::WriteInsertOperation(file, operation->partition_name, chunk, op_id);
+            if (!status.ok()) {
+                return status;
+            }
+        }
+    } catch (std::exception& ex) {
+        std::string msg = "Failed to record insert operation, reason: " + std::string(ex.what());
+        return Status(DB_ERROR, msg);
+    }
+
+    // insert action to db
+    if (db) {
+        auto status = db->Insert(operation->collection_name_, operation->partition_name, operation->data_chunk_, op_id);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+
+    return Status::OK();
+}
+
+Status
+WalManager::RecordDeleteOperation(const DeleteEntityOperationPtr& operation, const DBPtr& db) {
+    idx_t op_id = id_gen_.GetNextIDNumber();
+    operation->SetID(op_id);
+    int64_t append_size = operation->entity_ids_.size() * sizeof(idx_t);
+
+    // open wal file
+    try {
+        std::string path = ConstructFilePath(operation->collection_name_, std::to_string(op_id));
+        if (!path.empty()) {
+            std::lock_guard<std::mutex> lock(file_map_mutex_);
+            WalFilePtr file = file_map_[operation->collection_name_];
+            if (file == nullptr) {
+                file = std::make_shared<WalFile>(sync_mode_);
+                file_map_[operation->collection_name_] = file;
+                file->OpenFile(path, WalFile::APPEND_WRITE);
+            } else if (!file->IsOpened() || file->ExceedMaxSize(append_size)) {
+                file->OpenFile(path, WalFile::APPEND_WRITE);
+            }
+
+            // write to wal file
+            auto status = WalOperationCodec::WriteDeleteOperation(file, operation->entity_ids_, op_id);
+            if (!status.ok()) {
+                return status;
+            }
+        }
+    } catch (std::exception& ex) {
+        std::string msg = "Failed to record delete operation, reason: " + std::string(ex.what());
+        return Status(DB_ERROR, msg);
+    }
+
+    // delete action to db
+    if (db) {
+        return db->DeleteEntityByID(operation->collection_name_, operation->entity_ids_, op_id);
+    }
+
+    return Status::OK();
+}
+
+std::string
+WalManager::ConstructFilePath(const std::string& collection_name, const std::string& file_name) {
+    // typically, the wal file path is like: /xxx/milvus/wal/[collection_name]/xxxxxxxxxx
+    std::experimental::filesystem::path full_path(wal_path_);
+    full_path.append(collection_name);
+    full_path.append(file_name);
+
+    std::string path(full_path.c_str());
+    return path;
 }
 
 void
-WalManager::DropCollection(const std::string& collection_id) {
-    LOG_WAL_INFO_ << "drop collection " << collection_id;
-    std::lock_guard<std::mutex> lck(mutex_);
-    tables_.erase(collection_id);
-}
-
-void
-WalManager::CollectionFlushed(const std::string& collection_id, uint64_t lsn) {
-    std::unique_lock<std::mutex> lck(mutex_);
-    auto it = tables_.find(collection_id);
-    if (it != tables_.end()) {
-        it->second.flush_lsn = lsn;
-    }
-    lck.unlock();
-
-    LOG_WAL_INFO_ << collection_id << " is flushed by lsn " << lsn;
-}
-
-template <typename T>
-bool
-WalManager::Insert(const std::string& collection_id, const std::string& partition_tag, const IDNumbers& vector_ids,
-                   const std::vector<T>& vectors) {
-    MXLogType log_type;
-    if (std::is_same<T, float>::value) {
-        log_type = MXLogType::InsertVector;
-    } else if (std::is_same<T, uint8_t>::value) {
-        log_type = MXLogType::InsertBinary;
+WalManager::AddCleanupTask(const std::string& collection_name) {
+    std::lock_guard<std::mutex> lck(cleanup_task_mutex_);
+    if (cleanup_tasks_.empty()) {
+        cleanup_tasks_.push_back(collection_name);
     } else {
-        return false;
-    }
-
-    size_t vector_num = vector_ids.size();
-    if (vector_num == 0) {
-        LOG_WAL_ERROR_ << LogOut("[%s][%ld] The ids is empty.", "insert", 0);
-        return false;
-    }
-    size_t dim = vectors.size() / vector_num;
-    size_t unit_size = dim * sizeof(T) + sizeof(IDNumber);
-    size_t head_size = SizeOfMXLogRecordHeader + collection_id.length() + partition_tag.length();
-
-    MXLogRecord record;
-    record.type = log_type;
-    record.collection_id = collection_id;
-    record.partition_tag = partition_tag;
-
-    uint64_t new_lsn = 0;
-    for (size_t i = 0; i < vector_num; i += record.length) {
-        size_t surplus_space = p_buffer_->SurplusSpace();
-        size_t max_rcd_num = 0;
-        if (surplus_space >= head_size + unit_size) {
-            max_rcd_num = (surplus_space - head_size) / unit_size;
-        } else {
-            max_rcd_num = (mxlog_config_.buffer_size - head_size) / unit_size;
-        }
-        if (max_rcd_num == 0) {
-            LOG_WAL_ERROR_ << LogOut("[%s][%ld]", "insert", 0) << "Wal buffer size is too small "
-                           << mxlog_config_.buffer_size << " unit " << unit_size;
-            return false;
-        }
-
-        record.length = std::min(vector_num - i, max_rcd_num);
-        record.ids = vector_ids.data() + i;
-        record.data_size = record.length * dim * sizeof(T);
-        record.data = vectors.data() + i * dim;
-
-        auto error_code = p_buffer_->Append(record);
-        if (error_code != WAL_SUCCESS) {
-            p_buffer_->ResetWriteLsn(last_applied_lsn_);
-            return false;
-        }
-        new_lsn = record.lsn;
-    }
-
-    std::unique_lock<std::mutex> lck(mutex_);
-    last_applied_lsn_ = new_lsn;
-    auto it = tables_.find(collection_id);
-    if (it != tables_.end()) {
-        it->second.wal_lsn = new_lsn;
-    }
-    lck.unlock();
-
-    LOG_WAL_INFO_ << LogOut("[%s][%ld]", "insert", 0) << collection_id << " insert in part " << partition_tag
-                  << " with lsn " << new_lsn;
-
-    return p_meta_handler_->SetMXLogInternalMeta(new_lsn);
-}
-
-bool
-WalManager::DeleteById(const std::string& collection_id, const IDNumbers& vector_ids) {
-    size_t vector_num = vector_ids.size();
-    if (vector_num == 0) {
-        LOG_WAL_ERROR_ << "The ids is empty.";
-        return false;
-    }
-
-    size_t unit_size = sizeof(IDNumber);
-    size_t head_size = SizeOfMXLogRecordHeader + collection_id.length();
-
-    MXLogRecord record;
-    record.type = MXLogType::Delete;
-    record.collection_id = collection_id;
-    record.partition_tag = "";
-
-    uint64_t new_lsn = 0;
-    for (size_t i = 0; i < vector_num; i += record.length) {
-        size_t surplus_space = p_buffer_->SurplusSpace();
-        size_t max_rcd_num = 0;
-        if (surplus_space >= head_size + unit_size) {
-            max_rcd_num = (surplus_space - head_size) / unit_size;
-        } else {
-            max_rcd_num = (mxlog_config_.buffer_size - head_size) / unit_size;
-        }
-
-        record.length = std::min(vector_num - i, max_rcd_num);
-        record.ids = vector_ids.data() + i;
-        record.data_size = 0;
-        record.data = nullptr;
-
-        auto error_code = p_buffer_->Append(record);
-        if (error_code != WAL_SUCCESS) {
-            p_buffer_->ResetWriteLsn(last_applied_lsn_);
-            return false;
-        }
-        new_lsn = record.lsn;
-    }
-
-    std::unique_lock<std::mutex> lck(mutex_);
-    last_applied_lsn_ = new_lsn;
-    auto it = tables_.find(collection_id);
-    if (it != tables_.end()) {
-        it->second.wal_lsn = new_lsn;
-    }
-    lck.unlock();
-
-    LOG_WAL_INFO_ << collection_id << " delete rows by id, lsn " << new_lsn;
-
-    return p_meta_handler_->SetMXLogInternalMeta(new_lsn);
-}
-
-uint64_t
-WalManager::Flush(const std::string& collection_id) {
-    std::lock_guard<std::mutex> lck(mutex_);
-    // At most one flush requirement is waiting at any time.
-    // Otherwise, flush_info_ should be modified to a list.
-    __glibcxx_assert(!flush_info_.IsValid());
-
-    uint64_t lsn = 0;
-    if (collection_id.empty()) {
-        // flush all tables
-        for (auto& it : tables_) {
-            if (it.second.wal_lsn > it.second.flush_lsn) {
-                lsn = last_applied_lsn_;
-                break;
-            }
-        }
-
-    } else {
-        // flush one collection
-        auto it = tables_.find(collection_id);
-        if (it != tables_.end()) {
-            if (it->second.wal_lsn > it->second.flush_lsn) {
-                lsn = it->second.wal_lsn;
-            }
+        // no need to add duplicate name
+        std::string back = cleanup_tasks_.back();
+        if (back != collection_name) {
+            cleanup_tasks_.push_back(collection_name);
         }
     }
-
-    if (lsn != 0) {
-        flush_info_.collection_id_ = collection_id;
-        flush_info_.lsn_ = lsn;
-    }
-
-    LOG_WAL_INFO_ << collection_id << " want to be flush, lsn " << lsn;
-
-    return lsn;
 }
 
 void
-WalManager::RemoveOldFiles(uint64_t flushed_lsn) {
-    if (p_buffer_ != nullptr) {
-        p_buffer_->RemoveOldFiles(flushed_lsn);
+WalManager::TakeCleanupTask(std::string& collection_name) {
+    collection_name = "";
+    std::lock_guard<std::mutex> lck(cleanup_task_mutex_);
+    if (cleanup_tasks_.empty()) {
+        return;
+    }
+    collection_name = cleanup_tasks_.front();
+    cleanup_tasks_.pop_front();
+}
+
+void
+WalManager::StartCleanupThread() {
+    // the previous thread finished?
+    std::lock_guard<std::mutex> lck(cleanup_thread_mutex_);
+    if (cleanup_thread_results_.empty()) {
+        // start a new cleanup thread
+        cleanup_thread_results_.push_back(cleanup_thread_pool_.enqueue(&WalManager::CleanupThread, this));
+    } else {
+        std::chrono::milliseconds span(1);
+        if (cleanup_thread_results_.back().wait_for(span) == std::future_status::ready) {
+            cleanup_thread_results_.pop_back();
+
+            // start a new cleanup thread
+            cleanup_thread_results_.push_back(cleanup_thread_pool_.enqueue(&WalManager::CleanupThread, this));
+        }
     }
 }
 
-template bool
-WalManager::Insert<float>(const std::string& collection_id, const std::string& partition_tag,
-                          const IDNumbers& vector_ids, const std::vector<float>& vectors);
+void
+WalManager::WaitCleanupFinish() {
+    std::lock_guard<std::mutex> lck(cleanup_thread_mutex_);
+    for (auto& iter : cleanup_thread_results_) {
+        iter.wait();
+    }
+}
 
-template bool
-WalManager::Insert<uint8_t>(const std::string& collection_id, const std::string& partition_tag,
-                            const IDNumbers& vector_ids, const std::vector<uint8_t>& vectors);
+void
+WalManager::CleanupThread() {
+    SetThreadName("wal_clean");
 
-}  // namespace wal
+    std::string target_collection;
+    TakeCleanupTask(target_collection);
+
+    using DirectoryIterator = std::experimental::filesystem::recursive_directory_iterator;
+    while (!target_collection.empty()) {
+        std::string path = ConstructFilePath(target_collection, "");
+        std::experimental::filesystem::path collection_path = path;
+
+        // not a folder
+        if (!std::experimental::filesystem::is_directory(path)) {
+            TakeCleanupTask(target_collection);
+            continue;
+        }
+
+        // collection already deleted
+        std::experimental::filesystem::path file_path = collection_path;
+        file_path.append(WAL_DEL_FILE_NAME);
+        if (std::experimental::filesystem::is_regular_file(file_path)) {
+            // clean max operation id
+            {
+                std::lock_guard<std::mutex> lock(max_op_mutex_);
+                max_op_id_map_.erase(target_collection);
+            }
+            // clean opened file in buffer
+            {
+                std::lock_guard<std::mutex> lock(file_map_mutex_);
+                file_map_.erase(target_collection);
+
+                // remove collection folder
+                // do this under the lock to avoid multi-thread conflict
+                std::experimental::filesystem::remove_all(collection_path);
+                LOG_ENGINE_DEBUG_ << "WAL cleanup: " << collection_path;
+            }
+
+            TakeCleanupTask(target_collection);
+            continue;
+        }
+
+        // get max operation id
+        idx_t max_op = 0;
+        {
+            std::lock_guard<std::mutex> lock(max_op_mutex_);
+            if (max_op_id_map_.find(target_collection) != max_op_id_map_.end()) {
+                max_op = max_op_id_map_[target_collection];
+            }
+        }
+
+        // iterate files
+        std::map<idx_t, std::experimental::filesystem::path> wal_files;
+        FindWalFiles(collection_path, wal_files);
+
+        // no wal file
+        if (wal_files.empty()) {
+            TakeCleanupTask(target_collection);
+            continue;
+        }
+
+        // the std::map arrange id in assendent
+        // if the last id < max_op, delete the wal file
+        for (auto& pair : wal_files) {
+            WalFile file;
+            file.OpenFile(pair.second.c_str(), WalFile::READ);
+            idx_t last_id = 0;
+            file.ReadLastOpId(last_id);
+            if (last_id <= max_op) {
+                file.CloseFile();
+
+                // makesure wal file is closed
+                {
+                    std::lock_guard<std::mutex> lock(file_map_mutex_);
+                    WalFilePtr file = file_map_[target_collection];
+                    if (file) {
+                        if (file->Path() == pair.second) {
+                            file->CloseFile();
+                            file_map_.erase(target_collection);
+                        }
+                    }
+                }
+
+                std::experimental::filesystem::remove(pair.second);
+                LOG_ENGINE_DEBUG_ << "WAL cleanup: " << pair.second;
+            }
+        }
+
+        TakeCleanupTask(target_collection);
+    }
+}
+
+Status
+WalManager::PerformOperation(const WalOperationPtr& operation, const DBPtr& db) {
+    if (operation == nullptr || db == nullptr) {
+        return Status(DB_ERROR, "null pointer");
+    }
+
+    Status status;
+    switch (operation->Type()) {
+        case WalOperationType::INSERT_ENTITY: {
+            InsertEntityOperationPtr op = std::static_pointer_cast<InsertEntityOperation>(operation);
+            status = db->Insert(op->collection_name_, op->partition_name, op->data_chunk_, op->ID());
+            break;
+        }
+        case WalOperationType::DELETE_ENTITY: {
+            DeleteEntityOperationPtr op = std::static_pointer_cast<DeleteEntityOperation>(operation);
+            status = db->DeleteEntityByID(op->collection_name_, op->entity_ids_, op->ID());
+            break;
+        }
+        default:
+            return Status(DB_ERROR, "Unsupportted wal operation");
+    }
+
+    return status;
+}
+
 }  // namespace engine
 }  // namespace milvus

@@ -45,7 +45,7 @@ __global__ void l2SelectMin1(Tensor<T, 2, true> productDistances,
   // FIXME: if we have exact multiples, don't need this
   bool endRow = (blockIdx.x == gridDim.x - 1);
 
-  bool bitsetIsEmpty = (bitset.getSize(0) == 0);
+  bool bitsetEmpty = (bitset.getSize(0) == 0);
 
   if (endRow) {
     if (productDistances.getSize(0) % kRowsPerBlock == 0) {
@@ -57,9 +57,9 @@ __global__ void l2SelectMin1(Tensor<T, 2, true> productDistances,
     for (int row = rowStart; row < productDistances.getSize(0); ++row) {
       for (int col = threadIdx.x; col < productDistances.getSize(1);
            col += blockDim.x) {
-        if (bitsetIsEmpty || (!(bitset[col >> 3] & (0x1 << (col & 0x7))))) {
+        if (bitsetEmpty || (!(bitset[col >> 3] & (0x1 << (col & 0x7))))) {
           distance[0] = Math<T>::add(centroidDistances[col],
-                                    productDistances[row][col]);
+                                     productDistances[row][col]);
         } else {
           distance[0] = (T)(1.0 / 0.0);
         }
@@ -72,8 +72,8 @@ __global__ void l2SelectMin1(Tensor<T, 2, true> productDistances,
 
       // Reduce within the block
       threadMin[0] =
-        blockReduceAll<Pair<T, int>, Min<Pair<T, int> >, false, false>(
-        threadMin[0], Min<Pair<T, int> >(), blockMin);
+        blockReduceAll<Pair<T, int>, Min<Pair<T, int>>, false, false>(
+        threadMin[0], Min<Pair<T, int>>(), blockMin);
 
       if (threadIdx.x == 0) {
         outDistances[row][0] = threadMin[0].k;
@@ -111,8 +111,13 @@ __global__ void l2SelectMin1(Tensor<T, 2, true> productDistances,
     }
 
     // Reduce within the block
-    blockReduceAll<kRowsPerBlock, Pair<T, int>, Min<Pair<T, int> >, false, false>(
-      threadMin, Min<Pair<T, int> >(), blockMin);
+    blockReduceAll<kRowsPerBlock,
+                   Pair<T, int>,
+                   Min<Pair<T, int> >,
+                   false,
+                   false>(threadMin,
+                          Min<Pair<T, int> >(),
+                          blockMin);
 
     if (threadIdx.x == 0) {
 #pragma unroll
@@ -149,29 +154,24 @@ __global__ void l2SelectMinK(Tensor<T, 2, true> productDistances,
   int limit = utils::roundDown(productDistances.getSize(1), kWarpSize);
   int i = threadIdx.x;
 
-  bool bitsetIsEmpty = (bitset.getSize(0) == 0);
+  bool bitsetEmpty = (bitset.getSize(0) == 0);
   T v;
 
   for (; i < limit; i += blockDim.x) {
-    if (bitsetIsEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
+    if (bitsetEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
       v = Math<T>::add(centroidDistances[i],
                         productDistances[row][i]);
-    } else {
-      v = (T)(1.0 / 0.0);
+      heap.addThreadQ(v, i);
     }
-      
-    heap.add(v, i);
+    heap.checkThreadQ();
   }
 
   if (i < productDistances.getSize(1)) {
-    if (bitsetIsEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
+    if (bitsetEmpty || (!(bitset[i >> 3] & (0x1 << (i & 0x7))))) {
       v = Math<T>::add(centroidDistances[i],
                         productDistances[row][i]);
-    } else {
-      v = (T)(1.0 / 0.0);
+      heap.addThreadQ(v, i);
     }
-
-    heap.addThreadQ(v, i);
   }
 
   heap.reduce();
@@ -180,7 +180,6 @@ __global__ void l2SelectMinK(Tensor<T, 2, true> productDistances,
     outIndices[row][i] = smemV[i];
   }
 }
-
 
 template <typename T>
 void runL2SelectMin(Tensor<T, 2, true>& productDistances,
@@ -213,9 +212,9 @@ void runL2SelectMin(Tensor<T, 2, true>& productDistances,
 #define RUN_L2_SELECT(BLOCK, NUM_WARP_Q, NUM_THREAD_Q)                  \
     do {                                                                \
       l2SelectMinK<T, NUM_WARP_Q, NUM_THREAD_Q, BLOCK>                  \
-        <<<grid, BLOCK, 0, stream>>>(productDistances, centroidDistances, \
-                                    bitset, outDistances, outIndices,      \
-                                    k, Limits<T>::getMax());           \
+        <<<grid, BLOCK, 0, stream>>>(productDistances, centroidDistances, bitset, \
+                                     outDistances, outIndices,          \
+                                     k, Limits<T>::getMax());           \
     } while (0)
 
     // block size 128 for everything <= 1024
@@ -237,6 +236,7 @@ void runL2SelectMin(Tensor<T, 2, true>& productDistances,
       // smaller block for less shared memory
       RUN_L2_SELECT(64, 2048, 8);
 #endif
+
     } else {
       FAISS_ASSERT(false);
     }
@@ -259,22 +259,6 @@ void runL2SelectMin(Tensor<float, 2, true>& productDistances,
                         outIndices,
                         k,
                         stream);
-}
-
-void runL2SelectMin(Tensor<half, 2, true>& productDistances,
-                    Tensor<half, 1, true>& centroidDistances,
-                    Tensor<uint8_t, 1, true>& bitset,
-                    Tensor<half, 2, true>& outDistances,
-                    Tensor<int, 2, true>& outIndices,
-                    int k,
-                    cudaStream_t stream) {
-  runL2SelectMin<half>(productDistances,
-                       centroidDistances,
-                       bitset,
-                       outDistances,
-                       outIndices,
-                       k,
-                       stream);
 }
 
 } } // namespace

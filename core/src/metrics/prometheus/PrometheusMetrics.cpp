@@ -11,10 +11,11 @@
 
 #include "metrics/prometheus/PrometheusMetrics.h"
 #include "cache/GpuCacheMgr.h"
-#include "config/Config.h"
+#include "config/ServerConfig.h"
 #include "metrics/SystemInfo.h"
 #include "utils/Log.h"
 
+#include <unistd.h>
 #include <string>
 #include <utility>
 
@@ -24,24 +25,32 @@ namespace server {
 Status
 PrometheusMetrics::Init() {
     try {
-        Config& config = Config::GetInstance();
-        CONFIG_CHECK(config.GetMetricConfigEnableMonitor(startup_));
+        startup_ = config.metric.enable();
         if (!startup_) {
             return Status::OK();
         }
 
         // Following should be read from config file.
-        std::string push_port, push_address;
-        CONFIG_CHECK(config.GetMetricConfigPort(push_port));
-        CONFIG_CHECK(config.GetMetricConfigAddress(push_address));
+        int64_t server_port = config.network.bind.port();
+        int64_t push_port = config.metric.port();
+        std::string push_address = config.metric.address();
 
         const std::string uri = std::string("/metrics");
         // const std::size_t num_threads = 2;
 
-        auto labels = prometheus::Gateway::GetInstanceLabel("pushgateway");
+        std::string hostportstr;
+        char hostname[1024];
+        if (gethostname(hostname, sizeof(hostname)) == 0) {
+            hostportstr = std::string(hostname) + ":" + std::to_string(server_port);
+        } else {
+            hostportstr = "pushgateway";
+        }
+
+        auto labels = prometheus::Gateway::GetInstanceLabel(hostportstr);
 
         // Init pushgateway
-        gateway_ = std::make_shared<prometheus::Gateway>(push_address, push_port, "milvus_metrics", labels);
+        gateway_ =
+            std::make_shared<prometheus::Gateway>(push_address, std::to_string(push_port), "milvus_metrics", labels);
 
         // Init Exposer
         // exposer_ptr_ = std::make_shared<prometheus::Exposer>(bind_address, uri, num_threads);
@@ -83,12 +92,12 @@ PrometheusMetrics::GPUPercentGaugeSet() {
     }
 
     int numDevice = server::SystemInfo::GetInstance().num_device();
-    std::vector<uint64_t> used_total = server::SystemInfo::GetInstance().GPUMemoryTotal();
-    std::vector<uint64_t> used_memory = server::SystemInfo::GetInstance().GPUMemoryUsed();
+    std::vector<int64_t> used_total = server::SystemInfo::GetInstance().GPUMemoryTotal();
+    std::vector<int64_t> used_memory = server::SystemInfo::GetInstance().GPUMemoryUsed();
 
     for (int i = 0; i < numDevice; ++i) {
         prometheus::Gauge& GPU_percent = GPU_percent_.Add({{"DeviceNum", std::to_string(i)}});
-        double percent = (double)used_memory[i] / (double)used_total[i];
+        double percent = static_cast<double>(used_memory[i]) / static_cast<double>(used_total[i]);
         GPU_percent.Set(percent * 100);
     }
 }
@@ -99,13 +108,13 @@ PrometheusMetrics::GPUMemoryUsageGaugeSet() {
         return;
     }
 
-    std::vector<uint64_t> values = server::SystemInfo::GetInstance().GPUMemoryUsed();
-    constexpr uint64_t MtoB = 1024 * 1024;
+    std::vector<int64_t> values = server::SystemInfo::GetInstance().GPUMemoryUsed();
+    constexpr int64_t MB = 1024 * 1024;
     int numDevice = server::SystemInfo::GetInstance().num_device();
 
     for (int i = 0; i < numDevice; ++i) {
         prometheus::Gauge& GPU_memory = GPU_memory_usage_.Add({{"DeviceNum", std::to_string(i)}});
-        GPU_memory.Set(values[i] / MtoB);
+        GPU_memory.Set(values[i] / MB);
     }
 }
 
@@ -158,26 +167,32 @@ PrometheusMetrics::OctetsSet() {
         return;
     }
 
-    // get old stats and reset them
-    uint64_t old_inoctets = SystemInfo::GetInstance().get_inoctets();
-    uint64_t old_outoctets = SystemInfo::GetInstance().get_octets();
-    auto old_time = SystemInfo::GetInstance().get_nettime();
-    std::pair<uint64_t, uint64_t> in_and_out_octets = SystemInfo::GetInstance().Octets();
-    SystemInfo::GetInstance().set_inoctets(in_and_out_octets.first);
-    SystemInfo::GetInstance().set_outoctets(in_and_out_octets.second);
-    SystemInfo::GetInstance().set_nettime();
+    try {
+        // get old stats and reset them
+        uint64_t old_inoctets = SystemInfo::GetInstance().get_inoctets();
+        uint64_t old_outoctets = SystemInfo::GetInstance().get_octets();
+        auto old_time = SystemInfo::GetInstance().get_nettime();
 
-    //
-    constexpr double micro_to_second = 1e-6;
-    auto now_time = std::chrono::system_clock::now();
-    auto total_microsecond = METRICS_MICROSECONDS(old_time, now_time);
-    auto total_second = total_microsecond * micro_to_second;
-    if (total_second == 0) {
-        return;
+        std::pair<uint64_t, uint64_t> in_and_out_octets = SystemInfo::GetInstance().Octets();
+        SystemInfo::GetInstance().set_inoctets(in_and_out_octets.first);
+        SystemInfo::GetInstance().set_outoctets(in_and_out_octets.second);
+        SystemInfo::GetInstance().set_nettime();
+
+        //
+        constexpr double micro_to_second = 1e-6;
+        auto now_time = std::chrono::system_clock::now();
+        auto total_microsecond = METRICS_MICROSECONDS(old_time, now_time);
+        auto total_second = total_microsecond * micro_to_second;
+        if (total_second == 0) {
+            return;
+        }
+
+        inoctets_gauge_.Set((in_and_out_octets.first - old_inoctets) / total_second);
+        outoctets_gauge_.Set((in_and_out_octets.second - old_outoctets) / total_second);
+    } catch (std::exception& ex) {
+        std::string msg = "Failed to set in/out octets, reason: " + std::string(ex.what());
+        LOG_SERVER_ERROR_ << msg;
     }
-
-    inoctets_gauge_.Set((in_and_out_octets.first - old_inoctets) / total_second);
-    outoctets_gauge_.Set((in_and_out_octets.second - old_outoctets) / total_second);
 }
 
 void
@@ -188,7 +203,7 @@ PrometheusMetrics::CPUCoreUsagePercentSet() {
 
     std::vector<double> cpu_core_percent = server::SystemInfo::GetInstance().CPUCorePercent();
 
-    for (int i = 0; i < cpu_core_percent.size(); ++i) {
+    for (size_t i = 0; i < cpu_core_percent.size(); ++i) {
         prometheus::Gauge& core_percent = CPU_.Add({{"CPU", std::to_string(i)}});
         core_percent.Set(cpu_core_percent[i]);
     }
@@ -200,9 +215,9 @@ PrometheusMetrics::GPUTemperature() {
         return;
     }
 
-    std::vector<uint64_t> GPU_temperatures = server::SystemInfo::GetInstance().GPUTemperature();
+    std::vector<int64_t> GPU_temperatures = server::SystemInfo::GetInstance().GPUTemperature();
 
-    for (int i = 0; i < GPU_temperatures.size(); ++i) {
+    for (size_t i = 0; i < GPU_temperatures.size(); ++i) {
         prometheus::Gauge& gpu_temp = GPU_temperature_.Add({{"GPU", std::to_string(i)}});
         gpu_temp.Set(GPU_temperatures[i]);
     }
@@ -217,8 +232,8 @@ PrometheusMetrics::CPUTemperature() {
     std::vector<float> CPU_temperatures = server::SystemInfo::GetInstance().CPUTemperature();
 
     float avg_cpu_temp = 0;
-    for (int i = 0; i < CPU_temperatures.size(); ++i) {
-        avg_cpu_temp += CPU_temperatures[i];
+    for (float CPU_temperature : CPU_temperatures) {
+        avg_cpu_temp += CPU_temperature;
     }
     avg_cpu_temp /= CPU_temperatures.size();
 

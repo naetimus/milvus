@@ -12,6 +12,7 @@
 #include "scheduler/resource/Resource.h"
 #include "scheduler/SchedInst.h"
 #include "scheduler/Utils.h"
+#include "scheduler/task/FinishedTask.h"
 
 #include <iostream>
 #include <limits>
@@ -43,7 +44,7 @@ ToString(ResourceType type) {
 }
 
 Resource::Resource(std::string name, ResourceType type, uint64_t device_id, bool enable_executor)
-    : name_(std::move(name)), type_(type), device_id_(device_id), enable_executor_(enable_executor) {
+    : device_id_(device_id), name_(std::move(name)), type_(type), enable_executor_(enable_executor) {
     // register subscriber in tasktable
     task_table_.RegisterSubscriber([&] {
         if (subscriber_) {
@@ -116,8 +117,9 @@ Resource::pick_task_load() {
     auto indexes = task_table_.PickToLoad(10);
     for (auto index : indexes) {
         // try to set one task loading, then return
-        if (task_table_.Load(index))
+        if (task_table_.Load(index)) {
             return task_table_.at(index);
+        }
         // else try next
     }
     return nullptr;
@@ -172,6 +174,7 @@ Resource::loader_function() {
             task_item->Loaded();
             if (task_item->from) {
                 task_item->from->Moved();
+                task_item->from->task = FinishedTask::Create(task_item->from->task);
                 task_item->from = nullptr;
             }
             if (subscriber_) {
@@ -184,7 +187,7 @@ Resource::loader_function() {
 
 void
 Resource::executor_function() {
-    SetThreadName("taskexector_th");
+    SetThreadName("taskexecutor_th");
     if (subscriber_) {
         auto event = std::make_shared<StartUpEvent>(shared_from_this());
         subscriber_(std::static_pointer_cast<Event>(event));
@@ -201,6 +204,7 @@ Resource::executor_function() {
             }
             auto start = get_current_timestamp();
             Process(task_item->task);
+            task_item->task = FinishedTask::Create(task_item->task);
             auto finish = get_current_timestamp();
             ++total_task_;
             total_cost_ += finish - start;
@@ -212,6 +216,8 @@ Resource::executor_function() {
                 ResMgrInst::GetInstance()->GetResource("cpu")->WakeupLoader();
                 ResMgrInst::GetInstance()->GetResource("disk")->WakeupLoader();
             }
+
+            task_item->task = FinishedTask::Create(task_item->task);
 
             if (subscriber_) {
                 auto event = std::make_shared<FinishTaskEvent>(shared_from_this(), task_item);

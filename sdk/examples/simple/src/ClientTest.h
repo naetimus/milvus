@@ -11,8 +11,8 @@
 
 #pragma once
 
-#include <string>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -26,48 +26,45 @@ class ClientTest {
     void
     Test();
 
-    void
-    TestHybrid();
-
  private:
     void
-    ShowServerVersion();
+    ListCollections(std::vector<std::string>&);
 
     void
-    ShowSdkVersion();
+    CreateCollection(const std::string&);
 
     void
-    ShowCollections(std::vector<std::string>&);
+    GetCollectionInfo(const std::string&);
 
     void
-    CreateCollection(const std::string&, int64_t, milvus::MetricType);
+    InsertEntities(const std::string&);
 
     void
-    DescribeCollection(const std::string&);
-
-    void
-    InsertEntities(const std::string&, int64_t);
-
-    void
-    BuildSearchEntities(int64_t, int64_t);
+    CountEntities(const std::string&);
 
     void
     Flush(const std::string&);
 
     void
-    ShowCollectionInfo(const std::string&);
+    GetCollectionStats(const std::string&);
 
     void
-    GetEntityById(const std::string&, int64_t);
+    BuildVectors(int64_t nq, int64_t dimension);
 
     void
-    SearchEntities(const std::string&, int64_t, int64_t);
+    GetEntityByID(const std::string&, const std::vector<int64_t>&);
 
     void
-    CreateIndex(const std::string&, milvus::IndexType, int64_t);
+    SearchEntities(const std::string&, int64_t, int64_t, const std::string metric_type);
 
     void
-    PreloadCollection(const std::string&);
+    SearchEntitiesByID(const std::string&, int64_t, int64_t);
+
+    void
+    CreateIndex(const std::string&, int64_t);
+
+    void
+    LoadCollection(const std::string&);
 
     void
     CompactCollection(const std::string&);
@@ -76,24 +73,13 @@ class ClientTest {
     DeleteByIds(const std::string&, const std::vector<int64_t>& id_array);
 
     void
-    DropIndex(const std::string&);
+    DropIndex(const std::string& collection_name, const std::string& field_name, const std::string& index_name);
 
     void
     DropCollection(const std::string&);
 
-    /*******************************New Interface**********************************/
-
-    void
-    CreateHybridCollection(const std::string& collection_name);
-
-    void
-    InsertHybridEntities(std::string&, int64_t);
-
-    void
-    HybridSearch(std::string&);
-
  private:
     std::shared_ptr<milvus::Connection> conn_;
-    std::vector<std::pair<int64_t, milvus::Entity>> search_entity_array_;
+    std::vector<std::pair<int64_t, milvus::VectorData>> search_entity_array_;
     std::vector<int64_t> search_id_array_;
 };

@@ -20,10 +20,13 @@
 #include "knowhere/common/Exception.h"
 #include "knowhere/common/Typedef.h"
 #include "knowhere/index/Index.h"
-#include "knowhere/index/vector_index/IndexType.h"
+#include "knowhere/index/IndexType.h"
 
 namespace milvus {
 namespace knowhere {
+
+#define RAW_DATA "RAW_DATA"
+#define QUANTIZATION_DATA "QUANTIZATION_DATA"
 
 class VecIndex : public Index {
  public:
@@ -43,12 +46,14 @@ class VecIndex : public Index {
     AddWithoutIds(const DatasetPtr& dataset, const Config& config) = 0;
 
     virtual DatasetPtr
-    Query(const DatasetPtr& dataset, const Config& config) = 0;
+    Query(const DatasetPtr& dataset, const Config& config, const faiss::ConcurrentBitsetPtr& bitset) = 0;
 
+#if 0
     virtual DatasetPtr
     QueryById(const DatasetPtr& dataset, const Config& config) {
         return nullptr;
     }
+#endif
 
     // virtual DatasetPtr
     // QueryByRange(const DatasetPtr&, const Config&) = 0;
@@ -72,10 +77,12 @@ class VecIndex : public Index {
         return index_mode_;
     }
 
+#if 0
     virtual DatasetPtr
     GetVectorById(const DatasetPtr& dataset, const Config& config) {
         return nullptr;
     }
+#endif
 
     faiss::ConcurrentBitsetPtr
     GetBlacklist() {
@@ -125,6 +132,10 @@ class VecIndex : public Index {
         index_size_ = size;
     }
 
+    virtual void
+    UpdateIndexSize() {
+    }
+
     int64_t
     Size() override {
         return BlacklistSize() + UidsSize() + IndexSize();
@@ -133,9 +144,11 @@ class VecIndex : public Index {
  protected:
     IndexType index_type_ = "";
     IndexMode index_mode_ = IndexMode::MODE_CPU;
-    faiss::ConcurrentBitsetPtr bitset_ = nullptr;
     std::vector<IDType> uids_;
     int64_t index_size_ = -1;
+
+ private:
+    faiss::ConcurrentBitsetPtr bitset_ = nullptr;
 };
 
 using VecIndexPtr = std::shared_ptr<VecIndex>;

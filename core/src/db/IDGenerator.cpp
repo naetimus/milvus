@@ -12,8 +12,7 @@
 #include "db/IDGenerator.h"
 #include "utils/Log.h"
 
-#include <assert.h>
-#include <fiu-local.h>
+#include <fiu/fiu-local.h>
 #include <chrono>
 #include <iostream>
 #include <string>
@@ -25,7 +24,7 @@ IDGenerator::~IDGenerator() = default;
 
 constexpr size_t SimpleIDGenerator::MAX_IDS_PER_MICRO;
 
-IDNumber
+idx_t
 SimpleIDGenerator::GetNextIDNumber() {
     auto now = std::chrono::system_clock::now();
     auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
@@ -47,7 +46,7 @@ SimpleIDGenerator::NextIDNumbers(size_t n, IDNumbers& ids) {
     auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
     micros *= MAX_IDS_PER_MICRO;
 
-    for (int pos = 0; pos < n; ++pos) {
+    for (size_t pos = 0; pos < n; ++pos) {
         ids.push_back(micros + pos);
     }
     return Status::OK();
@@ -61,7 +60,7 @@ SimpleIDGenerator::GetNextIDNumbers(size_t n, IDNumbers& ids) {
     return Status::OK();
 }
 
-IDNumber
+idx_t
 SafeIDGenerator::GetNextIDNumber() {
     auto now = std::chrono::system_clock::now();
     auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
@@ -114,7 +113,7 @@ SafeIDGenerator::NextIDNumbers(size_t n, IDNumbers& ids) {
 
     int64_t ID_high_part = time_stamp_ms_ * MAX_IDS_PER_MICRO;
 
-    for (int pos = 0; pos < n; ++pos) {
+    for (size_t pos = 0; pos < n; ++pos) {
         ids.push_back(ID_high_part + pos);
     }
 

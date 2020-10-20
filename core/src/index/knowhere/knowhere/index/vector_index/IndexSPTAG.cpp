@@ -121,11 +121,6 @@ CPUSPTAGRNG::Train(const DatasetPtr& origin, const Config& train_config) {
 
     DatasetPtr dataset = origin;
 
-    // if (index_ptr_->GetDistCalcMethod() == SPTAG::DistCalcMethod::Cosine
-    //    && preprocessor_) {
-    //    preprocessor_->Preprocess(dataset);
-    //}
-
     auto vectorset = ConvertToVectorSet(dataset);
     auto metaset = ConvertToMetadataSet(dataset);
     index_ptr_->BuildIndex(vectorset, metaset);
@@ -181,7 +176,7 @@ CPUSPTAGRNG::SetParameters(const Config& config) {
 }
 
 DatasetPtr
-CPUSPTAGRNG::Query(const DatasetPtr& dataset_ptr, const Config& config) {
+CPUSPTAGRNG::Query(const DatasetPtr& dataset_ptr, const Config& config, const faiss::ConcurrentBitsetPtr& bitset) {
     SetParameters(config);
 
     float* p_data = (float*)dataset_ptr->Get<const void*>(meta::TENSOR);
@@ -205,12 +200,26 @@ CPUSPTAGRNG::Query(const DatasetPtr& dataset_ptr, const Config& config) {
 
 int64_t
 CPUSPTAGRNG::Count() {
+    if (!index_ptr_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
     return index_ptr_->GetNumSamples();
 }
 
 int64_t
 CPUSPTAGRNG::Dim() {
+    if (!index_ptr_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
     return index_ptr_->GetFeatureDim();
+}
+
+void
+CPUSPTAGRNG::UpdateIndexSize() {
+    if (!index_ptr_) {
+        KNOWHERE_THROW_MSG("index not initialize");
+    }
+    index_size_ = index_ptr_->GetIndexSize();
 }
 
 // void

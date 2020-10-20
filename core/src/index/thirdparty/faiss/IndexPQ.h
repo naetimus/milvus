@@ -124,6 +124,8 @@ struct IndexPQ: Index {
     void hamming_distance_table (idx_t n, const float *x,
                                  int32_t *dis) const;
 
+    size_t cal_size() { return codes.size() * sizeof(uint8_t) + pq.cal_size(); }
+
 };
 
 
@@ -156,7 +158,8 @@ struct MultiIndexQuantizer: Index  {
 
     void search(
         idx_t n, const float* x, idx_t k,
-        float* distances, idx_t* labels, ConcurrentBitsetPtr bitset = nullptr) const override;
+        float* distances, idx_t* labels,
+        ConcurrentBitsetPtr bitset = nullptr) const override;
 
     /// add and reset will crash at runtime
     void add(idx_t n, const float* x) override;

@@ -33,10 +33,10 @@ class BinaryIDMAP : public VecIndex, public FaissBaseBinaryIndex {
     }
 
     BinarySet
-    Serialize(const Config& config = Config()) override;
+    Serialize(const Config&) override;
 
     void
-    Load(const BinarySet& index_binary) override;
+    Load(const BinarySet&) override;
 
     void
     Train(const DatasetPtr&, const Config&) override;
@@ -48,28 +48,18 @@ class BinaryIDMAP : public VecIndex, public FaissBaseBinaryIndex {
     AddWithoutIds(const DatasetPtr&, const Config&) override;
 
     DatasetPtr
-    Query(const DatasetPtr&, const Config&) override;
-
-    DatasetPtr
-    QueryById(const DatasetPtr& dataset_ptr, const Config& config) override;
+    Query(const DatasetPtr&, const Config&, const faiss::ConcurrentBitsetPtr& bitset) override;
 
     int64_t
-    Count() override {
-        return index_->ntotal;
-    }
+    Count() override;
 
     int64_t
-    Dim() override {
-        return index_->d;
-    }
+    Dim() override;
 
     int64_t
     IndexSize() override {
         return Count() * Dim() / 8;
     }
-
-    DatasetPtr
-    GetVectorById(const DatasetPtr& dataset_ptr, const Config& config) override;
 
     virtual const uint8_t*
     GetRawVectors();
@@ -79,7 +69,8 @@ class BinaryIDMAP : public VecIndex, public FaissBaseBinaryIndex {
 
  protected:
     virtual void
-    QueryImpl(int64_t n, const uint8_t* data, int64_t k, float* distances, int64_t* labels, const Config& config);
+    QueryImpl(int64_t n, const uint8_t* data, int64_t k, float* distances, int64_t* labels, const Config& config,
+              const faiss::ConcurrentBitsetPtr& bitset);
 
  protected:
     std::mutex mutex_;

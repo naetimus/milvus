@@ -10,14 +10,13 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
 #include <fiu-control.h>
-#include <fiu-local.h>
+#include <fiu/fiu-local.h>
 #include <gtest/gtest.h>
 #include <memory>
 
 #include "knowhere/common/Exception.h"
-#include "knowhere/index/vector_index/FaissBaseIndex.h"
-#include "knowhere/index/vector_index/IndexNSG.h"
 #include "knowhere/index/vector_index/helpers/IndexParameter.h"
+#include "knowhere/index/vector_offset_index/IndexNSG_NM.h"
 #ifdef MILVUS_GPU_VERSION
 #include "knowhere/index/vector_index/gpu/IndexGPUIDMAP.h"
 #include "knowhere/index/vector_index/helpers/Cloner.h"
@@ -33,7 +32,7 @@ using ::testing::Combine;
 using ::testing::TestWithParam;
 using ::testing::Values;
 
-constexpr int64_t DEVICEID = 0;
+constexpr int64_t DEVICE_GPU0 = 0;
 
 class NSGInterfaceTest : public DataGen, public ::testing::Test {
  protected:
@@ -41,10 +40,11 @@ class NSGInterfaceTest : public DataGen, public ::testing::Test {
     SetUp() override {
 #ifdef MILVUS_GPU_VERSION
         int64_t MB = 1024 * 1024;
-        milvus::knowhere::FaissGpuResourceMgr::GetInstance().InitDevice(DEVICEID, MB * 200, MB * 600, 1);
+        milvus::knowhere::FaissGpuResourceMgr::GetInstance().InitDevice(DEVICE_GPU0, MB * 200, MB * 600, 1);
 #endif
-        Generate(256, 1000000 / 100, 10);
-        index_ = std::make_shared<milvus::knowhere::NSG>();
+        int nsg_dim = 256;
+        Generate(nsg_dim, 20000, nq);
+        index_ = std::make_shared<milvus::knowhere::NSG_NM>();
 
         train_conf = milvus::knowhere::Config{{milvus::knowhere::meta::DIM, 256},
                                               {milvus::knowhere::IndexParams::nlist, 163},
@@ -69,7 +69,7 @@ class NSGInterfaceTest : public DataGen, public ::testing::Test {
     }
 
  protected:
-    std::shared_ptr<milvus::knowhere::NSG> index_;
+    std::shared_ptr<milvus::knowhere::NSG_NM> index_;
     milvus::knowhere::Config train_conf;
     milvus::knowhere::Config search_conf;
 };
@@ -79,41 +79,54 @@ TEST_F(NSGInterfaceTest, basic_test) {
     fiu_init(0);
     // untrained index
     {
-        ASSERT_ANY_THROW(index_->Query(query_dataset, search_conf));
-        ASSERT_ANY_THROW(index_->Serialize());
+        ASSERT_ANY_THROW(index_->Serialize(search_conf));
+        ASSERT_ANY_THROW(index_->Query(query_dataset, search_conf, nullptr));
+        ASSERT_ANY_THROW(index_->Add(base_dataset, search_conf));
+        ASSERT_ANY_THROW(index_->AddWithoutIds(base_dataset, search_conf));
     }
-    // train_conf->gpu_id = milvus::knowhere::INVALID_VALUE;
-    // auto model_invalid_gpu = index_->Train(base_dataset, train_conf);
-    train_conf[milvus::knowhere::meta::DEVICEID] = DEVICEID;
-    index_->Train(base_dataset, train_conf);
-    auto result = index_->Query(query_dataset, search_conf);
+
+    train_conf[milvus::knowhere::meta::DEVICEID] = -1;
+    index_->BuildAll(base_dataset, train_conf);
+
+    // Serialize and Load before Query
+    milvus::knowhere::BinarySet bs = index_->Serialize(search_conf);
+
+    int64_t dim = base_dataset->Get<int64_t>(milvus::knowhere::meta::DIM);
+    int64_t rows = base_dataset->Get<int64_t>(milvus::knowhere::meta::ROWS);
+    auto raw_data = base_dataset->Get<const void*>(milvus::knowhere::meta::TENSOR);
+    milvus::knowhere::BinaryPtr bptr = std::make_shared<milvus::knowhere::Binary>();
+    bptr->data = std::shared_ptr<uint8_t[]>((uint8_t*)raw_data, [&](uint8_t*) {});
+    bptr->size = dim * rows * sizeof(float);
+    bs.Append(RAW_DATA, bptr);
+
+    index_->Load(bs);
+
+    auto result = index_->Query(query_dataset, search_conf, nullptr);
     AssertAnns(result, nq, k);
 
-    auto binaryset = index_->Serialize();
-    {
-        fiu_enable("NSG.Serialize.throw_exception", 1, nullptr, 0);
-        ASSERT_ANY_THROW(index_->Serialize());
-        fiu_disable("NSG.Serialize.throw_exception");
-    }
+    /* test NSG GPU train */
+    auto new_index_1 = std::make_shared<milvus::knowhere::NSG_NM>(DEVICE_GPU0);
+    train_conf[milvus::knowhere::meta::DEVICEID] = DEVICE_GPU0;
+    new_index_1->BuildAll(base_dataset, train_conf);
 
-    auto new_index = std::make_shared<milvus::knowhere::NSG>();
-    new_index->Load(binaryset);
-    {
-        fiu_enable("NSG.Load.throw_exception", 1, nullptr, 0);
-        ASSERT_ANY_THROW(new_index->Load(binaryset));
-        fiu_disable("NSG.Load.throw_exception");
-    }
+    // Serialize and Load before Query
+    bs = new_index_1->Serialize(search_conf);
 
-    auto new_result = new_index->Query(query_dataset, search_conf);
-    AssertAnns(result, nq, k);
+    dim = base_dataset->Get<int64_t>(milvus::knowhere::meta::DIM);
+    rows = base_dataset->Get<int64_t>(milvus::knowhere::meta::ROWS);
+    raw_data = base_dataset->Get<const void*>(milvus::knowhere::meta::TENSOR);
+    bptr = std::make_shared<milvus::knowhere::Binary>();
+    bptr->data = std::shared_ptr<uint8_t[]>((uint8_t*)raw_data, [&](uint8_t*) {});
+    bptr->size = dim * rows * sizeof(float);
+    bs.Append(RAW_DATA, bptr);
+
+    new_index_1->Load(bs);
+
+    auto new_result_1 = new_index_1->Query(query_dataset, search_conf, nullptr);
+    AssertAnns(new_result_1, nq, k);
 
     ASSERT_EQ(index_->Count(), nb);
     ASSERT_EQ(index_->Dim(), dim);
-    //    ASSERT_THROW({ index_->Clone(); }, milvus::knowhere::KnowhereException);
-    // ASSERT_NO_THROW({
-    //     index_->Add(base_dataset, milvus::knowhere::Config());
-    //     index_->Seal();
-    // });
 }
 
 TEST_F(NSGInterfaceTest, compare_test) {
@@ -134,10 +147,23 @@ TEST_F(NSGInterfaceTest, compare_test) {
 TEST_F(NSGInterfaceTest, delete_test) {
     assert(!xb.empty());
 
-    train_conf[milvus::knowhere::meta::DEVICEID] = DEVICEID;
+    train_conf[milvus::knowhere::meta::DEVICEID] = DEVICE_GPU0;
     index_->Train(base_dataset, train_conf);
 
-    auto result = index_->Query(query_dataset, search_conf);
+    // Serialize and Load before Query
+    milvus::knowhere::BinarySet bs = index_->Serialize(search_conf);
+
+    int64_t dim = base_dataset->Get<int64_t>(milvus::knowhere::meta::DIM);
+    int64_t rows = base_dataset->Get<int64_t>(milvus::knowhere::meta::ROWS);
+    auto raw_data = base_dataset->Get<const void*>(milvus::knowhere::meta::TENSOR);
+    milvus::knowhere::BinaryPtr bptr = std::make_shared<milvus::knowhere::Binary>();
+    bptr->data = std::shared_ptr<uint8_t[]>((uint8_t*)raw_data, [&](uint8_t*) {});
+    bptr->size = dim * rows * sizeof(float);
+    bs.Append(RAW_DATA, bptr);
+
+    index_->Load(bs);
+
+    auto result = index_->Query(query_dataset, search_conf, nullptr);
     AssertAnns(result, nq, k);
 
     ASSERT_EQ(index_->Count(), nb);
@@ -149,206 +175,25 @@ TEST_F(NSGInterfaceTest, delete_test) {
     }
 
     auto I_before = result->Get<int64_t*>(milvus::knowhere::meta::IDS);
-    /*
-    printf("I=\n");
-    for (int i = 0; i < nq; i++) {
-        for (int j = 0; j < k; j++) printf("%5ld ", I_before[i * k + j]);
-        printf("\n");
-    }*/
 
-    // search xq with delete
-    index_->SetBlacklist(bitset);
-    auto result_after = index_->Query(query_dataset, search_conf);
+    // Serialize and Load before Query
+    bs = index_->Serialize(search_conf);
+
+    dim = base_dataset->Get<int64_t>(milvus::knowhere::meta::DIM);
+    rows = base_dataset->Get<int64_t>(milvus::knowhere::meta::ROWS);
+    raw_data = base_dataset->Get<const void*>(milvus::knowhere::meta::TENSOR);
+    bptr = std::make_shared<milvus::knowhere::Binary>();
+    bptr->data = std::shared_ptr<uint8_t[]>((uint8_t*)raw_data, [&](uint8_t*) {});
+    bptr->size = dim * rows * sizeof(float);
+    bs.Append(RAW_DATA, bptr);
+
+    index_->Load(bs);
+    auto result_after = index_->Query(query_dataset, search_conf, bitset);
     AssertAnns(result_after, nq, k, CheckMode::CHECK_NOT_EQUAL);
     auto I_after = result_after->Get<int64_t*>(milvus::knowhere::meta::IDS);
-
-    /*
-    printf("I=\n");
-    for (int i = 0; i < nq; i++) {
-        for (int j = 0; j < k; j++) printf("%5ld ", I_after[i * k + j]);
-        printf("\n");
-    }*/
 
     // First vector deleted
     for (int i = 0; i < nq; i++) {
         ASSERT_NE(I_before[i * k], I_after[i * k]);
     }
-
-    /*
-    // Other results are the same
-    for (int i = 0; i < nq; i++) {
-        for (int j = 1; j <= k / 2; j++) {
-            ASSERT_EQ(I_before[i * k + j], I_after[i * k + j - 1]);
-        }
-    }*/
 }
-
-// TEST(test, ori_nsg) {
-//    //    float* p_data = nullptr;
-//    size_t rows, dim;
-//    char* filename = "/mnt/112d53a6-5592-4360-a33b-7fd789456fce/workspace/Data/sift/sift_base.fvecs";
-//    //    loads_data(filename, p_data, rows, dim);
-//    float* p_data = fvecs_read(filename, &dim, &rows);
-//
-//    std::string knng_filename =
-//        "/mnt/112d53a6-5592-4360-a33b-7fd789456fce/workspace/Cellar/anns/efanna_graph/tests/sift.1M.50NN.graph";
-//    std::vector<std::vector<int64_t>> knng;
-//    Load_nns_graph(knng, knng_filename.c_str());
-//
-//    //    float* search_data = nullptr;
-//    size_t nq, search_dim;
-//    char* searchfile = "/mnt/112d53a6-5592-4360-a33b-7fd789456fce/workspace/Data/sift/sift_query.fvecs";
-//    //    loads_data(searchfile, search_data, nq, search_dim);
-//    float* search_data = fvecs_read(searchfile, &search_dim, &nq);
-//    assert(search_dim == dim);
-//
-//    size_t k, nq2;
-//    char* gtfile = "/mnt/112d53a6-5592-4360-a33b-7fd789456fce/workspace/Data/sift/sift_groundtruth.ivecs";
-//    int* gt_int = ivecs_read(gtfile, &k, &nq2);
-//    int64_t* gt = new int64_t[k * nq2];
-//    for (int i = 0; i < k * nq2; i++) {
-//        gt[i] = gt_int[i];
-//    }
-//    delete[] gt_int;
-//
-//    std::vector<int64_t> store_ids(rows);
-//    for (int i = 0; i < rows; ++i) {
-//        store_ids[i] = i;
-//    }
-//
-//    int64_t* I = new int64_t[nq * k];
-//    float* D = new float[nq * k];
-//#if 0
-//        efanna2e::Parameters params;
-//        params.Set<int64_t>("L", 50);
-//        params.Set<int64_t>("R", 55);
-//        params.Set<int64_t>("C", 300);
-//        auto orinsg = std::make_shared<efanna2e::IndexNSG>(dim, rows, efanna2e::Metric::L2, nullptr);
-//        orinsg->Load_nn_graph(knng);
-//        orinsg->Build(rows, (float*)p_data, params);
-//
-//        efanna2e::Parameters paras;
-//        paras.Set<unsigned>("L_search", 45);
-//        paras.Set<unsigned>("P_search",100);
-//        k = 10;
-//        std::vector<std::vector<int64_t> > res;
-//        for (unsigned i = 0; i < nq; i++) {
-//            std::vector<int64_t> tmp(k);
-//            orinsg->Search(search_data + i * dim, p_data, k, paras, tmp.data());
-//            res.push_back(tmp);
-//        }
-//    }
-//#else
-//    knowhere::algo::BuildParams params;
-//    params.search_length = 50;
-//    params.out_degree = 55;
-//    params.candidate_pool_size = 300;
-//    auto nsg = std::make_shared<knowhere::algo::NsgIndex>(dim, rows);
-//#if 1
-//    knowhere::FaissGpuResourceMgr::GetInstance().InitDevice(DEVICEID, 1024 * 1024 * 200, 1024 * 1024 * 600, 2);
-//    auto dataset = generate_dataset(int64_t(rows), int64_t(dim), p_data, store_ids.data());
-//    auto config = std::make_shared<knowhere::IVFCfg>();
-//    config->d = dim;
-//    config->gpu_id = 0;
-//    config->metric_type = knowhere::METRICTYPE::L2;
-//    auto preprocess_index = std::make_shared<knowhere::IDMAP>();
-//    preprocess_index->Train(config);
-//    preprocess_index->AddWithoutId(dataset, config);
-//    auto xx = knowhere::cloner::CopyCpuToGpu(preprocess_index, 0, config);
-//    auto ss = std::dynamic_pointer_cast<knowhere::GPUIDMAP>(xx);
-//
-//    std::vector<std::vector<int64_t>> kng;
-//    ss->GenGraph(p_data, 50, kng, config);
-//    nsg->SetKnnGraph(kng);
-//    knowhere::FaissGpuResourceMgr::GetInstance().Free();
-//#else
-//    nsg->SetKnnGraph(knng);
-//#endif
-//    nsg->Build_with_ids(rows, (float*)p_data, store_ids.data(), params);
-//    knowhere::algo::SearchParams s_params;
-//    s_params.search_length = 45;
-//    nsg->Search(search_data, nq, dim, k, D, I, s_params);
-//#endif
-//
-//    int n_1 = 0, n_10 = 0, n_100 = 0;
-//    for (int i = 0; i < nq; i++) {
-//        int gt_nn = gt[i * k];
-//        for (int j = 0; j < k; j++) {
-//            if (I[i * k + j] == gt_nn) {
-//                if (j < 1)
-//                    n_1++;
-//                if (j < 10)
-//                    n_10++;
-//                if (j < 100)
-//                    n_100++;
-//            }
-//        }
-//    }
-//    printf("R@1 = %.4f\n", n_1 / float(nq));
-//    printf("R@10 = %.4f\n", n_10 / float(nq));
-//    printf("R@100 = %.4f\n", n_100 / float(nq));
-//}
-//
-// TEST(testxx, test_idmap){
-//    int k = 50;
-//    std::string knng_filename =
-//        "/mnt/112d53a6-5592-4360-a33b-7fd789456fce/workspace/Cellar/anns/efanna_graph/tests/sift.50NN.graph";
-//    std::vector<std::vector<int64_t>> gt_knng;
-//    Load_nns_graph(gt_knng, knng_filename.c_str());
-//
-//    size_t rows, dim;
-//    char* filename =
-//    "/mnt/112d53a6-5592-4360-a33b-7fd789456fce/workspace/Cellar/anns/efanna_graph/tests/siftsmall/siftsmall_base.fvecs";
-//    float* p_data = fvecs_read(filename, &dim, &rows);
-//
-//    std::vector<int64_t> store_ids(rows);
-//    for (int i = 0; i < rows; ++i) {
-//        store_ids[i] = i;
-//    }
-//
-//    knowhere::FaissGpuResourceMgr::GetInstance().InitDevice(DEVICEID, 1024 * 1024 * 200, 1024 * 1024 * 600, 2);
-//    auto dataset = generate_dataset(int64_t(rows), int64_t(dim), p_data, store_ids.data());
-//    auto config = std::make_shared<knowhere::IVFCfg>();
-//    config->d = dim;
-//    config->gpu_id = 0;
-//    config->metric_type = knowhere::METRICTYPE::L2;
-//    auto preprocess_index = std::make_shared<knowhere::IDMAP>();
-//    preprocess_index->Train(config);
-//    preprocess_index->AddWithoutId(dataset, config);
-//    auto xx = knowhere::cloner::CopyCpuToGpu(preprocess_index, 0, config);
-//    auto ss = std::dynamic_pointer_cast<knowhere::GPUIDMAP>(xx);
-//    std::vector<std::vector<int64_t>> idmap_knng;
-//    ss->GenGraph(p_data, k, idmap_knng,config);
-//    knowhere::FaissGpuResourceMgr::GetInstance().Free();
-//
-//    int n_1 = 0, n_10 = 0, n_100 = 0;
-//    for (int i = 0; i < rows; i++) {
-//        int gt_nn = gt_knng[i][0];
-//        int l_n_1 = 0;
-//        int l_n_10 = 0;
-//        int l_n_100 = 0;
-//        for (int j = 0; j < k; j++) {
-//            if (idmap_knng[i][j] == gt_nn) {
-//                if (j < 1){
-//                    n_1++;
-//                    l_n_1++;
-//                }
-//                if (j < 10){
-//                    n_10++;
-//                    l_n_10++;
-//                }
-//                if (j < 100){
-//                    n_100++;
-//                    l_n_100++;
-//                }
-//
-//            }
-//            if ((j == k-1) && (l_n_100 == 0)){
-//                std::cout << "error id: " << i << std::endl;
-//            }
-//        }
-//    }
-//    printf("R@1 = %.4f\n", n_1 / float(rows));
-//    printf("R@10 = %.4f\n", n_10 / float(rows));
-//    printf("R@100 = %.4f\n", n_100 / float(rows));
-//}

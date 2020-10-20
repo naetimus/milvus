@@ -19,6 +19,7 @@ namespace faiss {
 
 /** Index that stores the full vectors and performs exhaustive search */
 struct IndexFlat: Index {
+
     /// database vectors, size ntotal * d
     std::vector<float> xb;
 
@@ -35,6 +36,12 @@ struct IndexFlat: Index {
         float* distances,
         idx_t* labels,
         ConcurrentBitsetPtr bitset = nullptr) const override;
+
+    void assign (
+        idx_t n,
+        const float * x,
+        idx_t * labels,
+        float* distances = nullptr) override;
 
     void range_search(
         idx_t n,
@@ -77,6 +84,8 @@ struct IndexFlat: Index {
 
     void sa_decode (idx_t n, const uint8_t *bytes,
                             float *x) const override;
+
+    size_t cal_size() { return xb.size() * sizeof(float); }
 
 };
 
@@ -148,7 +157,7 @@ struct IndexRefineFlat: Index {
 };
 
 
-/// optimized version for 1D "vectors"
+/// optimized version for 1D "vectors".
 struct IndexFlat1D:IndexFlatL2 {
     bool continuous_update; ///< is the permutation updated continuously?
 

@@ -16,18 +16,19 @@
 #include <unordered_map>
 #include <vector>
 
-#include "Options.h"
-#include "Types.h"
-#include "context/HybridSearchContext.h"
-#include "meta/Meta.h"
-#include "query/GeneralQuery.h"
-#include "server/context/Context.h"
+#include "db/SimpleWaitNotify.h"
+#include "db/SnapshotHandlers.h"
+#include "db/Types.h"
+#include "db/insert/MemManager.h"
+#include "db/merge/MergeManager.h"
+#include "db/snapshot/Context.h"
+#include "db/snapshot/ResourceTypes.h"
+#include "db/snapshot/Resources.h"
+#include "utils/Json.h"
 #include "utils/Status.h"
 
 namespace milvus {
 namespace engine {
-
-class Env;
 
 class DB {
  public:
@@ -47,121 +48,84 @@ class DB {
     Stop() = 0;
 
     virtual Status
-    CreateCollection(meta::CollectionSchema& table_schema_) = 0;
+    CreateCollection(const snapshot::CreateCollectionContext& context) = 0;
 
     virtual Status
-    DropCollection(const std::string& collection_id) = 0;
+    DropCollection(const std::string& collection_name) = 0;
 
     virtual Status
-    DescribeCollection(meta::CollectionSchema& table_schema_) = 0;
+    HasCollection(const std::string& collection_name, bool& has_or_not) = 0;
 
     virtual Status
-    HasCollection(const std::string& collection_id, bool& has_or_not_) = 0;
+    ListCollections(std::vector<std::string>& names) = 0;
 
     virtual Status
-    HasNativeCollection(const std::string& collection_id, bool& has_or_not_) = 0;
+    GetCollectionInfo(const std::string& collection_name, snapshot::CollectionPtr& collection,
+                      snapshot::FieldElementMappings& fields_schema) = 0;
 
     virtual Status
-    AllCollections(std::vector<meta::CollectionSchema>& table_schema_array) = 0;
+    GetCollectionStats(const std::string& collection_name, milvus::json& collection_stats) = 0;
 
     virtual Status
-    GetCollectionInfo(const std::string& collection_id, CollectionInfo& collection_info) = 0;
+    CountEntities(const std::string& collection_name, int64_t& row_count) = 0;
 
     virtual Status
-    GetCollectionRowCount(const std::string& collection_id, uint64_t& row_count) = 0;
+    CreatePartition(const std::string& collection_name, const std::string& partition_name) = 0;
 
     virtual Status
-    PreloadCollection(const std::string& collection_id) = 0;
+    DropPartition(const std::string& collection_name, const std::string& partition_name) = 0;
 
     virtual Status
-    UpdateCollectionFlag(const std::string& collection_id, int64_t flag) = 0;
+    HasPartition(const std::string& collection_name, const std::string& partition_tag, bool& exist) = 0;
 
     virtual Status
-    CreatePartition(const std::string& collection_id, const std::string& partition_name,
-                    const std::string& partition_tag) = 0;
+    ListPartitions(const std::string& collection_name, std::vector<std::string>& partition_names) = 0;
 
     virtual Status
-    DropPartition(const std::string& partition_name) = 0;
+    CreateIndex(const server::ContextPtr& context, const std::string& collection_name, const std::string& field_name,
+                const CollectionIndex& index) = 0;
 
     virtual Status
-    DropPartitionByTag(const std::string& collection_id, const std::string& partition_tag) = 0;
+    DropIndex(const std::string& collection_name, const std::string& field_name = "") = 0;
 
     virtual Status
-    ShowPartitions(const std::string& collection_id, std::vector<meta::CollectionSchema>& partition_schema_array) = 0;
+    DescribeIndex(const std::string& collection_name, const std::string& field_name, CollectionIndex& index) = 0;
+
+    // op_id is for wal machinery, this id will be used in MemManager
+    virtual Status
+    Insert(const std::string& collection_name, const std::string& partition_name, DataChunkPtr& data_chunk,
+           idx_t op_id = 0) = 0;
 
     virtual Status
-    InsertVectors(const std::string& collection_id, const std::string& partition_tag, VectorsData& vectors) = 0;
+    GetEntityByID(const std::string& collection_name, const IDNumbers& id_array,
+                  const std::vector<std::string>& field_names, std::vector<bool>& valid_row,
+                  DataChunkPtr& data_chunk) = 0;
+
+    // op_id is for wal machinery, this id will be used in MemManager
+    virtual Status
+    DeleteEntityByID(const std::string& collection_name, const engine::IDNumbers& entity_ids, idx_t op_id = 0) = 0;
 
     virtual Status
-    DeleteVector(const std::string& collection_id, IDNumber vector_id) = 0;
+    ListIDInSegment(const std::string& collection_name, int64_t segment_id, IDNumbers& entity_ids) = 0;
 
     virtual Status
-    DeleteVectors(const std::string& collection_id, IDNumbers vector_ids) = 0;
+    Query(const server::ContextPtr& context, const query::QueryPtr& query_ptr, engine::QueryResultPtr& result) = 0;
 
     virtual Status
-    Flush(const std::string& collection_id) = 0;
+    LoadCollection(const server::ContextPtr& context, const std::string& collection_name,
+                   const std::vector<std::string>& field_names, bool force = false) = 0;
+
+    virtual Status
+    Flush(const std::string& collection_name) = 0;
 
     virtual Status
     Flush() = 0;
 
     virtual Status
-    Compact(const std::string& collection_id) = 0;
+    Compact(const server::ContextPtr& context, const std::string& collection_name, double threshold = 0.0) = 0;
 
-    virtual Status
-    GetVectorByID(const std::string& collection_id, const IDNumber& vector_id, VectorsData& vector) = 0;
-
-    virtual Status
-    GetVectorIDs(const std::string& collection_id, const std::string& segment_id, IDNumbers& vector_ids) = 0;
-
-    //    virtual Status
-    //    Merge(const std::set<std::string>& table_ids) = 0;
-
-    virtual Status
-    QueryByID(const std::shared_ptr<server::Context>& context, const std::string& collection_id,
-              const std::vector<std::string>& partition_tags, uint64_t k, const milvus::json& extra_params,
-              IDNumber vector_id, ResultIds& result_ids, ResultDistances& result_distances) = 0;
-
-    virtual Status
-    Query(const std::shared_ptr<server::Context>& context, const std::string& collection_id,
-          const std::vector<std::string>& partition_tags, uint64_t k, const milvus::json& extra_params,
-          const VectorsData& vectors, ResultIds& result_ids, ResultDistances& result_distances) = 0;
-
-    virtual Status
-    QueryByFileID(const std::shared_ptr<server::Context>& context, const std::vector<std::string>& file_ids, uint64_t k,
-                  const milvus::json& extra_params, const VectorsData& vectors, ResultIds& result_ids,
-                  ResultDistances& result_distances) = 0;
-
-    virtual Status
-    Size(uint64_t& result) = 0;
-
-    virtual Status
-    CreateIndex(const std::string& collection_id, const CollectionIndex& index) = 0;
-
-    virtual Status
-    DescribeIndex(const std::string& collection_id, CollectionIndex& index) = 0;
-
-    virtual Status
-    DropIndex(const std::string& collection_id) = 0;
-
-    virtual Status
-    DropAll() = 0;
-
-    virtual Status
-    CreateHybridCollection(meta::CollectionSchema& collection_schema, meta::hybrid::FieldsSchema& fields_schema) = 0;
-
-    virtual Status
-    DescribeHybridCollection(meta::CollectionSchema& collection_schema, meta::hybrid::FieldsSchema& fields_schema) = 0;
-
-    virtual Status
-    InsertEntities(const std::string& collection_id, const std::string& partition_tag, Entity& entity,
-                   std::unordered_map<std::string, meta::hybrid::DataType>& field_types) = 0;
-
-    virtual Status
-    HybridQuery(const std::shared_ptr<server::Context>& context, const std::string& collection_id,
-                const std::vector<std::string>& partition_tags, context::HybridSearchContextPtr hybrid_search_context,
-                query::GeneralQueryPtr general_query,
-                std::unordered_map<std::string, engine::meta::hybrid::DataType>& attr_type, uint64_t& nq,
-                engine::ResultIds& result_ids, engine::ResultDistances& result_distances) = 0;
+    virtual bool
+    IsBuildingIndex() = 0;
 };  // DB
 
 using DBPtr = std::shared_ptr<DB>;

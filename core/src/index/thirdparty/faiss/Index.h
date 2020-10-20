@@ -10,17 +10,16 @@
 #ifndef FAISS_INDEX_H
 #define FAISS_INDEX_H
 
-
+#include <faiss/MetricType.h>
+#include <faiss/utils/ConcurrentBitset.h>
 #include <cstdio>
 #include <typeinfo>
 #include <string>
 #include <sstream>
 
-#include <faiss/utils/ConcurrentBitset.h>
-
 #define FAISS_VERSION_MAJOR 1
 #define FAISS_VERSION_MINOR 6
-#define FAISS_VERSION_PATCH 0
+#define FAISS_VERSION_PATCH 3
 
 /**
  * @namespace faiss
@@ -41,39 +40,15 @@
 
 namespace faiss {
 
-
-/// Some algorithms support both an inner product version and a L2 search version.
-enum MetricType {
-    METRIC_INNER_PRODUCT = 0,  ///< maximum inner product search
-    METRIC_L2 = 1,             ///< squared L2 search
-    METRIC_L1,                 ///< L1 (aka cityblock)
-    METRIC_Linf,               ///< infinity distance
-    METRIC_Lp,                 ///< L_p distance, p is given by metric_arg
-    METRIC_Jaccard,
-    METRIC_Tanimoto,
-    METRIC_Hamming,
-    METRIC_Substructure,       ///< Tversky case alpha = 0, beta = 1
-    METRIC_Superstructure,     ///< Tversky case alpha = 1, beta = 0
-
-    /// some additional metrics defined in scipy.spatial.distance
-    METRIC_Canberra = 20,
-    METRIC_BrayCurtis,
-    METRIC_JensenShannon,
-
-};
-
-
 /// Forward declarations see AuxIndexStructures.h
 struct IDSelector;
 struct RangeSearchResult;
 struct DistanceComputer;
 
-/** Abstract structure for an index
+/** Abstract structure for an index, supports adding vectors and searching them.
  *
- * Supports adding vertices and searching them.
- *
- * Currently only asymmetric queries are supported:
- * database-to-database queries are not implemented.
+ * All vectors provided at add or search time are 32-bit float arrays,
+ * although the internal representation may vary.
  */
 struct Index {
     using idx_t = int64_t;  ///< all indices are this type
@@ -119,6 +94,13 @@ struct Index {
      */
     virtual void add (idx_t n, const float *x) = 0;
 
+    /** Same as add, but only add ids, not codes
+     * 
+     * @param n      nb of training vectors
+     * @param x      training vecors, size n * d
+     */
+    virtual void add_without_codes(idx_t n, const float* x);
+
     /** Same as add, but stores xids instead of sequential ids.
      *
      * The default implementation fails with an assertion, as it is
@@ -127,6 +109,12 @@ struct Index {
      * @param xids if non-null, ids to store for the vectors (size n)
      */
     virtual void add_with_ids (idx_t n, const float * x, const idx_t *xids);
+
+    /** Same as add_with_ids, but only add ids, not codes
+     * 
+     * @param xids if non-null, ids to store for the vectors (size n)
+     */
+    virtual void add_with_ids_without_codes(idx_t n, const float* x, const idx_t* xids);
 
     /** query n vectors of dimension d to the index.
      *
@@ -138,9 +126,11 @@ struct Index {
      * @param distances   output pairwise distances, size n*k
      * @param bitset      flags to check the validity of vectors
      */
-    virtual void search (idx_t n, const float *x, idx_t k, float *distances, idx_t *labels,
+    virtual void search (idx_t n, const float *x, idx_t k,
+                         float *distances, idx_t *labels,
                          ConcurrentBitsetPtr bitset = nullptr) const = 0;
 
+#if 0
     /** query n raw vectors from the index by ids.
      *
      * return n raw vectors.
@@ -162,8 +152,9 @@ struct Index {
      * @param distances   output pairwise distances, size n*k
      * @param bitset      flags to check the validity of vectors
      */
-    virtual void search_by_id (idx_t n, const idx_t *xid, idx_t k, float *distances, idx_t *labels,
-                               ConcurrentBitsetPtr bitset = nullptr);
+     virtual void search_by_id (idx_t n, const idx_t *xid, idx_t k, float *distances, idx_t *labels,
+                                ConcurrentBitsetPtr bitset = nullptr);
+#endif
 
     /** query n vectors of dimension d to the index.
      *
@@ -183,9 +174,9 @@ struct Index {
      *
      * This function is identical as search but only return labels of neighbors.
      * @param x           input vectors to search, size n * d
-     * @param labels      output labels of the NNs, size n*k
+     * @param labels      output labels of the NNs, size n
      */
-    void assign (idx_t n, const float * x, idx_t * labels, idx_t k = 1);
+    virtual void assign (idx_t n, const float* x, idx_t* labels, float* distance = nullptr);
 
     /// removes all elements from the database.
     virtual void reset() = 0;
